@@ -13,6 +13,7 @@
         <FileAlignment>512</FileAlignment>
         <LangVersion>latest</LangVersion>
         <Nullable>enable</Nullable>
+        <GamePath><!-- Set GamePath manually --></GamePath>
     </PropertyGroup>
     <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
         <PlatformTarget>AnyCPU</PlatformTarget>
@@ -33,33 +34,50 @@
         <ErrorReport>prompt</ErrorReport>
         <WarningLevel>4</WarningLevel>
     </PropertyGroup>
+    <Choose>
+        <When Condition="($(OS) == 'Unix' OR $(OS) == 'OSX') AND $(GamePath) == ''">
+            <PropertyGroup>
+                <GamePath Condition="!Exists('$(GamePath)')">$(HOME)/.steam/steam/steamapps/common/Valheim</GamePath>
+                <GamePath Condition="!Exists('$(GamePath)')">$(HOME)/Library/Application Support/Steam/steamapps/common/Valheim/Contents/MacOS</GamePath>
+            </PropertyGroup>
+        </When>
+        <When Condition="($(OS) == 'Windows_NT') AND $(GamePath) == ''">
+            <PropertyGroup>
+                <GamePath Condition="!Exists('$(GamePath)')">$([MSBuild]::GetRegistryValueFromView('HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\Steam App 892970', 'InstallLocation', null, RegistryView.Registry64, RegistryView.Registry32))</GamePath>
+                <_SteamLibraryPath>$([MSBuild]::GetRegistryValueFromView('HKEY_CURRENT_USER\SOFTWARE\Valve\Steam', 'SteamPath', null, RegistryView.Registry32))</_SteamLibraryPath>
+                <GamePath Condition="!Exists('$(GamePath)') AND '$(_SteamLibraryPath)' != ''">$(_SteamLibraryPath)\steamapps\common\Valheim</GamePath>
+                <GamePath Condition="!Exists('$(GamePath)')">C:\Program Files\Steam\steamapps\common\Valheim</GamePath>
+                <GamePath Condition="!Exists('$(GamePath)')">C:\Program Files (x86)\Steam\steamapps\common\Valheim</GamePath>
+            </PropertyGroup>
+        </When>
+    </Choose>
     <ItemGroup>
         <Reference Include="0Harmony, Version=2.0.4.0, Culture=neutral, processorArchitecture=MSIL">
           <SpecificVersion>False</SpecificVersion>
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\BepInEx\core\0Harmony.dll</HintPath>
+          <HintPath>$(GamePath)\BepInEx\core\0Harmony.dll</HintPath>
         </Reference>
         <Reference Include="assembly_utils, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null">
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\assembly_utils.dll</HintPath>
+          <HintPath>$(GamePath)\valheim_Data\Managed\assembly_utils.dll</HintPath>
         </Reference>
         <Reference Include="assembly_valheim, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null">
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\valheim_Data\Managed\assembly_valheim.dll</HintPath>
+          <HintPath>$(GamePath)\valheim_Data\Managed\assembly_valheim.dll</HintPath>
         </Reference>
         <Reference Include="BepInEx, Version=5.4.8.0, Culture=neutral, processorArchitecture=MSIL">
           <SpecificVersion>False</SpecificVersion>
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\BepInEx\core\BepInEx.dll</HintPath>
+          <HintPath>$(GamePath)\BepInEx\core\BepInEx.dll</HintPath>
         </Reference>
         <Reference Include="System" />
         <Reference Include="System.Core" />
         <Reference Include="System.Data" />
         <Reference Include="System.Xml" />
         <Reference Include="UnityEngine, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null">
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\unstripped_corlib\UnityEngine.dll</HintPath>
+          <HintPath>$(GamePath)\unstripped_corlib\UnityEngine.dll</HintPath>
         </Reference>
         <Reference Include="UnityEngine.CoreModule, Version=0.0.0.0, Culture=neutral, PublicKeyToken=null">
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\unstripped_managed\UnityEngine.CoreModule.dll</HintPath>
+          <HintPath>$(GamePath)\unstripped_corlib\UnityEngine.CoreModule.dll</HintPath>
         </Reference>
         <Reference Include="UnityEngine.UI, Version=1.0.0.0, Culture=neutral, PublicKeyToken=null">
-          <HintPath>..\..\..\..\..\..\Program Files (x86)\Steam\steamapps\common\Valheim\unstripped_managed\UnityEngine.UI.dll</HintPath>
+          <HintPath>$(GamePath)\unstripped_corlib\UnityEngine.UI.dll</HintPath>
         </Reference>
     </ItemGroup>
     <ItemGroup>

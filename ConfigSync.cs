@@ -415,7 +415,7 @@ namespace ServerSync
 						}
 						else if (configName == "requiredversion")
 						{
-							if (CurrentVersion == null || new Version(value?.ToString() ?? "0.0.0") > new Version(CurrentVersion))
+							if (CurrentVersion == null || new System.Version(value?.ToString() ?? "0.0.0") > new System.Version(CurrentVersion))
 							{
 								Debug.LogError($"Received minimum version is higher than required version: minimum required version = {value?.ToString() ?? "0.0.0"}; local version = {CurrentVersion ?? "unknown"}");
 								Game.instance.Logout();
