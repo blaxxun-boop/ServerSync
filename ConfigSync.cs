@@ -1,6 +1,6 @@
 ﻿using System;
+using System.Collections;
 using System.Collections.Generic;
-using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.IO.Compression;
@@ -91,6 +91,11 @@ namespace ServerSync
 			}
 		}
 	}
+
+	internal class ConfigurationManagerAttributes
+	{
+		public bool? ReadOnly = false;
+	}
 	
 	public class ConfigSync
 	{
@@ -160,7 +165,7 @@ namespace ServerSync
 			if (configData(configEntry) is not SyncedConfigEntry<T> syncedEntry)
 			{
 				syncedEntry = new SyncedConfigEntry<T>(configEntry);
-				AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[]{ new ReadOnlyAttribute(false) }.Concat(configEntry.Description.Tags ?? new object[0]).Concat(new []{ syncedEntry }).ToArray()); 
+				AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[]{ new ConfigurationManagerAttributes() }.Concat(configEntry.Description.Tags ?? new object[0]).Concat(new []{ syncedEntry }).ToArray()); 
 				configEntry.SettingChanged += (_, _) =>
 				{
 					if (!ProcessingServerUpdate)
@@ -223,10 +228,25 @@ namespace ServerSync
 				foreach (ConfigSync configSync in configSyncs)
 				{
 					configSync.IsSourceOfTruth = __instance.IsDedicated() || __instance.IsServer();
-					ZRoutedRpc.instance.Register<ZPackage>(configSync.Name + " ConfigSync", configSync.UpdateConfigValue);
+					ZRoutedRpc.instance.Register<ZPackage>(configSync.Name + " ConfigSync", configSync.RPC_ConfigSync);
 					if (isServer)
 					{
 						Debug.Log($"Registered '{configSync.Name} ConfigSync' RPC - waiting for incoming connections");
+					}
+				}
+			}
+		}
+		
+		[HarmonyPatch(typeof(ZNet), "OnNewConnection")]
+		private static class RegisterClientRPCPatch
+		{
+			private static void Postfix(ZNet __instance, ZNetPeer peer)
+			{
+				if (!__instance.IsServer())
+				{
+					foreach (ConfigSync configSync in configSyncs)
+					{
+						peer.m_rpc.Register<ZPackage>(configSync.Name + " ConfigSync", configSync.RPC_InitialConfigSync);
 					}
 				}
 			}
@@ -239,7 +259,9 @@ namespace ServerSync
 		private readonly Dictionary<string, SortedDictionary<int, byte[]>> configValueCache = new();
 		private readonly List<KeyValuePair<long, string>> cacheExpirations = new(); // avoid leaking memory
 		
-		private void UpdateConfigValue(long sender, ZPackage package)
+		private void RPC_InitialConfigSync(ZRpc rpc, ZPackage package) => RPC_ConfigSync(0, package);
+
+		private void RPC_ConfigSync(long sender, ZPackage package)
 		{
 			try
 			{
@@ -485,10 +507,9 @@ namespace ServerSync
 		
 		private void serverLockedSettingChanged()
 		{
-			FieldInfo field = AccessTools.DeclaredField(typeof(ReadOnlyAttribute), "isReadOnly");
 			foreach (OwnConfigEntryBase configEntryBase in allConfigs)
 			{
-				field.SetValue(configAttribute<ReadOnlyAttribute>(configEntryBase.BaseConfig), !isWritableConfig(configEntryBase));
+				configAttribute<ConfigurationManagerAttributes>(configEntryBase.BaseConfig).ReadOnly = !isWritableConfig(configEntryBase);
 			}
 		}
 
@@ -523,15 +544,45 @@ namespace ServerSync
 			const int packageSliceSize = 250000;
 			const int maximumSendQueueSize = 20000;
 
+			IEnumerable<bool> waitForQueue()
+			{
+				float timeout = Time.time + 30;
+				while (peer.m_socket.GetSendQueueSize() > maximumSendQueueSize)
+				{
+					if (Time.time > timeout)
+					{
+						Debug.Log($"Disconnecting {peer.m_uid} after 30 seconds config sending timeout");
+						peer.m_rpc.Invoke("Error", ZNet.ConnectionStatus.ErrorConnectFailed);
+						ZNet.instance.Disconnect(peer);
+						yield break;
+					}
+
+					yield return false;
+				}
+			}
+			
+			void SendPackage(ZPackage pkg)
+			{
+				string method = Name + " ConfigSync";
+				if (isServer)
+				{
+					peer.m_rpc.Invoke(method, pkg);
+				}
+				else
+				{
+					rpc.InvokeRoutedRPC(peer.m_server ? 0 : peer.m_uid, method, pkg);
+				}
+			}
+
 			if (package.GetArray() is byte[] { LongLength: > packageSliceSize } data)
 			{
 				int fragments = (int)(1 + (data.LongLength - 1) / packageSliceSize);
 				long packageIdentifier = ++packageCounter;
 				for (int fragment = 0; fragment < fragments; fragment++)
 				{
-					while (peer.m_socket.GetSendQueueSize() > maximumSendQueueSize)
+					foreach (bool wait in waitForQueue())
 					{
-						yield return false;
+						yield return wait;
 					}
 
 					if (!peer.m_socket.IsConnected())
@@ -545,7 +596,7 @@ namespace ServerSync
 					fragmentedPackage.Write(fragment);
 					fragmentedPackage.Write(fragments);
 					fragmentedPackage.Write(data.Skip(packageSliceSize * fragment).Take(packageSliceSize).ToArray());
-					rpc.InvokeRoutedRPC(peer.m_server ? 0 : peer.m_uid, Name + " ConfigSync", fragmentedPackage);
+					SendPackage(fragmentedPackage);
 
 					if (fragment != fragments - 1)
 					{
@@ -555,20 +606,36 @@ namespace ServerSync
 			}
 			else
 			{
-				while (peer.m_socket.GetSendQueueSize() > maximumSendQueueSize)
+				foreach (bool wait in waitForQueue())
 				{
-					yield return false;
+					yield return wait;
 				}
 
-				rpc.InvokeRoutedRPC(peer.m_server ? 0 : peer.m_uid, Name + " ConfigSync", package);
+				SendPackage(package);
 			}
 		}
-		
-		private void sendZPackage(long target, ZPackage package)
+
+		private IEnumerator sendZPackage(long target, ZPackage package)
 		{
 			if (!ZNet.instance)
 			{
-				return;
+				return Enumerable.Empty<object>().GetEnumerator();
+			}
+
+			List<ZNetPeer> peers = (List<ZNetPeer>) AccessTools.DeclaredField(typeof(ZRoutedRpc), "m_peers").GetValue(ZRoutedRpc.instance);
+			if (target != ZRoutedRpc.Everybody)
+			{
+				peers = peers.Where(p => p.m_uid == target).ToList();
+			}
+
+			return sendZPackage(peers, package);
+		}
+
+		private IEnumerator sendZPackage(List<ZNetPeer> peers, ZPackage package)
+		{
+			if (!ZNet.instance)
+			{
+				yield break;
 			}
 
 			const int compressMinSize = 10000;
@@ -586,45 +653,125 @@ namespace ServerSync
 				package = compressedPackage;
 			}
 
-			List<ZNetPeer> peers = (List<ZNetPeer>) AccessTools.DeclaredField(typeof(ZRoutedRpc), "m_peers").GetValue(ZRoutedRpc.instance);
-			if (target != ZRoutedRpc.Everybody)
-			{
-				peers = peers.Where(p => p.m_uid == target).ToList();
-			}
-
 			List<IEnumerator<bool>> writers = peers.Where(peer => peer.IsReady()).Select(p => distributeConfigToPeers(p, package)).ToList();
-			do
+			writers.RemoveAll(writer => !writer.MoveNext());
+			while (writers.Count > 0)
 			{
+				yield return null;
 				writers.RemoveAll(writer => !writer.MoveNext());
-			} while (writers.Count > 0);
+			}
 		}
 		
+		[HarmonyPatch(typeof(ZNet), "SendPeerInfo")]
+		private class BufferPeerInfoSending
+		{
+			public class BufferingSocket : ISocket
+			{
+				public bool finished = false;
+				public ZPackage? Package;
+				public readonly ISocket Original;
+
+				public BufferingSocket(ISocket original)
+				{
+					Original = original;
+				}
+
+				public bool IsConnected() => Original.IsConnected();
+				public ZPackage Recv() => Original.Recv();
+				public int GetSendQueueSize() => Original.GetSendQueueSize();
+				public int GetCurrentSendRate() => Original.GetCurrentSendRate();
+				public bool IsHost() => Original.IsHost();
+				public void Dispose() => Original.Dispose();
+				public bool GotNewData() => Original.GotNewData();
+				public void Close() => Original.Close();
+				public string GetEndPointString() => Original.GetEndPointString();
+				public void GetAndResetStats(out int totalSent, out int totalRecv) => Original.GetAndResetStats(out totalSent, out totalRecv);
+				public void GetConnectionQuality(out float localQuality, out float remoteQuality, out int ping, out float outByteSec, out float inByteSec) => Original.GetConnectionQuality(out localQuality, out remoteQuality, out ping, out outByteSec, out inByteSec);
+				public ISocket Accept() => Original.Accept();
+				public int GetHostPort() => Original.GetHostPort();
+				public bool Flush() => Original.Flush();
+				public string GetHostName() => Original.GetHostName();
+
+				public void Send(ZPackage pkg)
+				{
+					pkg.SetPos(0);
+					int methodHash = pkg.ReadInt();
+					if (methodHash == "PeerInfo".GetStableHashCode() && !finished)
+					{
+						Package = new ZPackage(pkg.GetArray()); // the original ZPackage gets reused, create a new one
+					}
+					else
+					{
+						Original.Send(pkg);
+					}
+				}
+			}
+			
+			[HarmonyPriority(Priority.Last)]
+			public static void Prefix(ZNet __instance, ZRpc rpc)
+			{
+				if (__instance.IsServer())
+				{
+					BufferingSocket bufferingSocket = SendConfigsAfterLogin.currentBufferingSocket = new(rpc.GetSocket());
+					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket);
+				}
+			}
+
+			[HarmonyPriority(Priority.First)]
+			private static void Postfix(ZRpc rpc)
+			{
+				if (rpc.GetSocket() is BufferingSocket bufferingSocket)
+				{
+					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket.Original);
+				}
+			}
+		}
+
 		[HarmonyPatch(typeof(ZNet), "RPC_PeerInfo")]
 		private class SendConfigsAfterLogin
 		{
-			public static void Postfix(ZNet __instance, ZRpc rpc)
+			public static BufferPeerInfoSending.BufferingSocket currentBufferingSocket = null!;
+			
+			private static void Postfix(ZNet __instance, ZRpc rpc)
 			{
-				if (__instance.IsServer())
+				if (!__instance.IsServer())
+				{
+					return;
+				}
+
+				BufferPeerInfoSending.BufferingSocket bufferingSocket = currentBufferingSocket;
+				ZNetPeer peer = (ZNetPeer) AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] {typeof(ZRpc)}).Invoke(__instance, new object[] {rpc});
+				
+				IEnumerator sendAsync()
 				{
 					foreach (ConfigSync configSync in configSyncs)
 					{
 						List<PackageEntry> entries = new();
 						if (configSync.CurrentVersion != null)
 						{
-							entries.Add(new PackageEntry {section = "Internal", key = "serverversion", type = typeof(string), value = configSync.CurrentVersion});
+							entries.Add(new PackageEntry { section = "Internal", key = "serverversion", type = typeof(string), value = configSync.CurrentVersion });
 						}
+
 						if (configSync.MinimumRequiredVersion != null)
 						{
-							entries.Add(new PackageEntry {section = "Internal", key = "requiredversion", type = typeof(string), value = configSync.MinimumRequiredVersion});
+							entries.Add(new PackageEntry { section = "Internal", key = "requiredversion", type = typeof(string), value = configSync.MinimumRequiredVersion });
 						}
-						entries.Add(new PackageEntry {section = "Internal", key = "lockexempt", type = typeof(bool), value = ((SyncedList) AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance)).Contains(rpc.GetSocket().GetHostName()) });
 
-						ZNetPeer peer = (ZNetPeer) AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] {typeof(ZRpc)}).Invoke(__instance, new object[] {rpc});
+						entries.Add(new PackageEntry { section = "Internal", key = "lockexempt", type = typeof(bool), value = ((SyncedList) AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance)).Contains(rpc.GetSocket().GetHostName()) });
 
 						ZPackage package = ConfigsToPackage(configSync.allConfigs.Select(c => c.BaseConfig), configSync.allCustomValues, entries, false);
-						configSync.sendZPackage(peer.m_uid, package);
+
+						yield return __instance.StartCoroutine(configSync.sendZPackage(new List<ZNetPeer> { peer }, package));
+					}
+
+					bufferingSocket.finished = true;
+					if (bufferingSocket.Package != null)
+					{
+						bufferingSocket.Original.Send(bufferingSocket.Package);
 					}
 				}
+
+				__instance.StartCoroutine(sendAsync());
 			}
 		}
 
@@ -641,7 +788,7 @@ namespace ServerSync
 			if (!IsLocked || isServer)
 			{
 				ZPackage package = ConfigsToPackage(configs);
-				sendZPackage(target, package);
+				ZNet.instance?.StartCoroutine(sendZPackage(target, package));
 			}
 		}
 
@@ -650,7 +797,7 @@ namespace ServerSync
 			if (!IsLocked || isServer)
 			{
 				ZPackage package = ConfigsToPackage(customValues: customValues);
-				sendZPackage(target, package);
+				ZNet.instance?.StartCoroutine(sendZPackage(target, package));
 			}
 		}
 
