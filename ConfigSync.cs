@@ -6,6 +6,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -17,11 +18,11 @@ namespace ServerSync
 	{
 		public object? LocalBaseValue;
 		public abstract ConfigEntryBase BaseConfig { get; }
-		
+
 		public bool SynchronizedConfig = true;
 	}
-	
-	public class SyncedConfigEntry<T>: OwnConfigEntryBase
+
+	public class SyncedConfigEntry<T> : OwnConfigEntryBase
 	{
 		public override ConfigEntryBase BaseConfig => SourceConfig;
 		public readonly ConfigEntry<T> SourceConfig;
@@ -44,6 +45,7 @@ namespace ServerSync
 		public readonly Type Type;
 
 		private object? boxedValue;
+
 		public object? BoxedValue
 		{
 			get => boxedValue;
@@ -65,7 +67,7 @@ namespace ServerSync
 			configSync.SourceOfTruthChanged += truth => localIsOwner = truth;
 		}
 	}
-	
+
 	public sealed class CustomSyncedValue<T> : CustomSyncedValueBase
 	{
 		public T Value
@@ -73,7 +75,7 @@ namespace ServerSync
 			get => (T)BoxedValue!;
 			set => BoxedValue = value;
 		}
-		
+
 		public CustomSyncedValue(ConfigSync configSync, string identifier, T value = default!) : base(configSync, identifier, typeof(T))
 		{
 			Value = value;
@@ -96,7 +98,7 @@ namespace ServerSync
 	{
 		public bool? ReadOnly = false;
 	}
-	
+
 	public class ConfigSync
 	{
 		public static bool ProcessingServerUpdate = false;
@@ -106,9 +108,10 @@ namespace ServerSync
 		public string? CurrentVersion;
 		public string? MinimumRequiredVersion;
 
-		public bool IsLocked => lockedConfig != null && ((IConvertible) lockedConfig.BaseConfig.BoxedValue).ToInt32(CultureInfo.InvariantCulture) != 0 && !lockExempt;
+		public bool IsLocked => lockedConfig != null && ((IConvertible)lockedConfig.BaseConfig.BoxedValue).ToInt32(CultureInfo.InvariantCulture) != 0 && !lockExempt;
 
 		private bool isSourceOfTruth = true;
+
 		public bool IsSourceOfTruth
 		{
 			get => isSourceOfTruth;
@@ -131,7 +134,7 @@ namespace ServerSync
 
 		private static bool isServer;
 		private static string? connectionError;
-		
+
 		private static bool lockExempt = false;
 
 		private OwnConfigEntryBase? lockedConfig = null;
@@ -153,7 +156,7 @@ namespace ServerSync
 				}
 			});
 		}
-		
+
 		public ConfigSync(string name)
 		{
 			Name = name;
@@ -165,7 +168,7 @@ namespace ServerSync
 			if (configData(configEntry) is not SyncedConfigEntry<T> syncedEntry)
 			{
 				syncedEntry = new SyncedConfigEntry<T>(configEntry);
-				AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[]{ new ConfigurationManagerAttributes() }.Concat(configEntry.Description.Tags ?? new object[0]).Concat(new []{ syncedEntry }).ToArray()); 
+				AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[] { new ConfigurationManagerAttributes() }.Concat(configEntry.Description.Tags ?? new object[0]).Concat(new[] { syncedEntry }).ToArray());
 				configEntry.SettingChanged += (_, _) =>
 				{
 					if (!ProcessingServerUpdate)
@@ -175,26 +178,26 @@ namespace ServerSync
 				};
 				allConfigs.Add(syncedEntry);
 			}
-			
+
 			return syncedEntry;
 		}
-		
+
 		public SyncedConfigEntry<T> AddLockingConfigEntry<T>(ConfigEntry<T> lockingConfig) where T : IConvertible
 		{
 			if (lockedConfig != null)
 			{
 				throw new Exception("Cannot initialize locking ConfigEntry twice");
 			}
-			
+
 			lockedConfig = AddConfigEntry(lockingConfig);
 			lockingConfig.SettingChanged += (_, _) => lockedConfigChanged?.Invoke();
 
-			return (SyncedConfigEntry<T>) lockedConfig;
+			return (SyncedConfigEntry<T>)lockedConfig;
 		}
 
 		internal void AddCustomValue(CustomSyncedValueBase customValue)
 		{
-			if (allCustomValues.Select(v => v.Identifier).Concat(new []{"serverversion", "requiredversion"}).Contains(customValue.Identifier))
+			if (allCustomValues.Select(v => v.Identifier).Concat(new[] { "serverversion", "requiredversion" }).Contains(customValue.Identifier))
 			{
 				throw new Exception("Cannot have multiple settings with the same name or with a reserved name (serverversion or requiredversion)");
 			}
@@ -208,7 +211,7 @@ namespace ServerSync
 				}
 			};
 		}
-		
+
 		[HarmonyPatch(typeof(ZRpc), "HandlePackage")]
 		private static class SnatchCurrentlyHandlingRPC
 		{
@@ -236,7 +239,7 @@ namespace ServerSync
 				}
 			}
 		}
-		
+
 		[HarmonyPatch(typeof(ZNet), "OnNewConnection")]
 		private static class RegisterClientRPCPatch
 		{
@@ -258,7 +261,7 @@ namespace ServerSync
 
 		private readonly Dictionary<string, SortedDictionary<int, byte[]>> configValueCache = new();
 		private readonly List<KeyValuePair<long, string>> cacheExpirations = new(); // avoid leaking memory
-		
+
 		private void RPC_InitialConfigSync(ZRpc rpc, ZPackage package) => RPC_ConfigSync(0, package);
 
 		private void RPC_ConfigSync(long sender, ZPackage package)
@@ -267,7 +270,7 @@ namespace ServerSync
 			{
 				if (isServer && IsLocked)
 				{
-					bool? exempt = ((SyncedList?) AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance))?.Contains(SnatchCurrentlyHandlingRPC.currentRpc?.GetSocket()?.GetHostName());
+					bool? exempt = ((SyncedList?)AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance))?.Contains(SnatchCurrentlyHandlingRPC.currentRpc?.GetSocket()?.GetHostName());
 					if (exempt == false)
 					{
 						return;
@@ -313,13 +316,13 @@ namespace ServerSync
 					package = new ZPackage(dataFragments.Values.SelectMany(a => a).ToArray());
 					packageFlags = package.ReadByte();
 				}
-				
+
 				ProcessingServerUpdate = true;
 
 				if ((packageFlags & COMPRESSED_CONFIG) != 0)
 				{
 					byte[] data = package.ReadByteArray();
-					
+
 					MemoryStream input = new(data);
 					MemoryStream output = new();
 					using (DeflateStream deflateStream = new(input, CompressionMode.Decompress))
@@ -370,7 +373,7 @@ namespace ServerSync
 				if (!isServer)
 				{
 					Debug.Log($"Received {configs.configValues.Count} configs and {configs.customValues.Count} custom values from the server for mod {DisplayName ?? Name}");
-					
+
 					serverLockedSettingChanged(); // Re-evaluate for intial locking
 				}
 			}
@@ -385,7 +388,7 @@ namespace ServerSync
 			public readonly Dictionary<OwnConfigEntryBase, object?> configValues = new();
 			public readonly Dictionary<CustomSyncedValueBase, object?> customValues = new();
 		}
-		
+
 		private ParsedConfigs ReadConfigsFromPackage(ZPackage package)
 		{
 			ParsedConfigs configs = new();
@@ -468,7 +471,7 @@ namespace ServerSync
 
 			return configs;
 		}
-		
+
 		[HarmonyPatch(typeof(FejdStartup), "ShowConnectError")]
 		private class ShowConnectionError
 		{
@@ -480,7 +483,7 @@ namespace ServerSync
 				}
 			}
 		}
-		
+
 		[HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
 		private class ResetConfigsOnShutdown
 		{
@@ -501,10 +504,10 @@ namespace ServerSync
 			{
 				return true;
 			}
-			
+
 			return configSync.IsSourceOfTruth || !config.SynchronizedConfig || config.LocalBaseValue == null || (!configSync.IsLocked && (config != configSync.lockedConfig || lockExempt));
 		}
-		
+
 		private void serverLockedSettingChanged()
 		{
 			foreach (OwnConfigEntryBase configEntryBase in allConfigs)
@@ -526,7 +529,7 @@ namespace ServerSync
 				config.BoxedValue = config.LocalBaseValue;
 				config.LocalBaseValue = null;
 			}
-			
+
 			lockedConfigChanged -= serverLockedSettingChanged;
 			IsSourceOfTruth = true;
 			serverLockedSettingChanged();
@@ -560,7 +563,7 @@ namespace ServerSync
 					yield return false;
 				}
 			}
-			
+
 			void SendPackage(ZPackage pkg)
 			{
 				string method = Name + " ConfigSync";
@@ -622,7 +625,7 @@ namespace ServerSync
 				return Enumerable.Empty<object>().GetEnumerator();
 			}
 
-			List<ZNetPeer> peers = (List<ZNetPeer>) AccessTools.DeclaredField(typeof(ZRoutedRpc), "m_peers").GetValue(ZRoutedRpc.instance);
+			List<ZNetPeer> peers = (List<ZNetPeer>)AccessTools.DeclaredField(typeof(ZRoutedRpc), "m_peers").GetValue(ZRoutedRpc.instance);
 			if (target != ZRoutedRpc.Everybody)
 			{
 				peers = peers.Where(p => p.m_uid == target).ToList();
@@ -639,7 +642,7 @@ namespace ServerSync
 			}
 
 			const int compressMinSize = 10000;
-			
+
 			if (package.GetArray() is byte[] { LongLength: > compressMinSize } rawData)
 			{
 				ZPackage compressedPackage = new();
@@ -667,7 +670,7 @@ namespace ServerSync
 		{
 			private class BufferingSocket : ISocket
 			{
-				public bool finished = false;
+				public volatile bool finished = false;
 				public readonly List<ZPackage> Package = new();
 				public readonly ISocket Original;
 
@@ -708,24 +711,27 @@ namespace ServerSync
 			}
 
 			[HarmonyPriority(Priority.First)]
-			private static void Prefix(ref BufferingSocket __state, ZNet __instance, ZRpc rpc)
+			private static void Prefix(ref Dictionary<Assembly, BufferingSocket>? __state, ZNet __instance, ZRpc rpc)
 			{
 				if (__instance.IsServer())
 				{
-					__state = new(rpc.GetSocket());
-					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, __state);
+					BufferingSocket bufferingSocket = new(rpc.GetSocket());
+					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket);
+
+					__state ??= new Dictionary<Assembly, BufferingSocket>();
+					__state[Assembly.GetExecutingAssembly()] = bufferingSocket;
 				}
 			}
 
-			private static void Postfix(BufferingSocket __state, ZNet __instance, ZRpc rpc)
+			private static void Postfix(Dictionary<Assembly, BufferingSocket> __state, ZNet __instance, ZRpc rpc)
 			{
 				if (!__instance.IsServer())
 				{
 					return;
 				}
 
-				ZNetPeer peer = (ZNetPeer) AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] {typeof(ZRpc)}).Invoke(__instance, new object[] {rpc});
-				
+				ZNetPeer peer = (ZNetPeer)AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] { typeof(ZRpc) }).Invoke(__instance, new object[] { rpc });
+
 				IEnumerator sendAsync()
 				{
 					foreach (ConfigSync configSync in configSyncs)
@@ -741,7 +747,7 @@ namespace ServerSync
 							entries.Add(new PackageEntry { section = "Internal", key = "requiredversion", type = typeof(string), value = configSync.MinimumRequiredVersion });
 						}
 
-						entries.Add(new PackageEntry { section = "Internal", key = "lockexempt", type = typeof(bool), value = ((SyncedList) AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance)).Contains(rpc.GetSocket().GetHostName()) });
+						entries.Add(new PackageEntry { section = "Internal", key = "lockexempt", type = typeof(bool), value = ((SyncedList)AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance)).Contains(rpc.GetSocket().GetHostName()) });
 
 						ZPackage package = ConfigsToPackage(configSync.allConfigs.Select(c => c.BaseConfig), configSync.allCustomValues, entries, false);
 
@@ -753,10 +759,12 @@ namespace ServerSync
 						AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket.Original);
 					}
 
-					__state.finished = true;
-					foreach (ZPackage package in __state.Package)
+					bufferingSocket = __state[Assembly.GetExecutingAssembly()];
+					bufferingSocket.finished = true;
+
+					foreach (ZPackage package in bufferingSocket.Package)
 					{
-						__state.Original.Send(package);
+						bufferingSocket.Original.Send(package);
 					}
 				}
 
@@ -766,12 +774,12 @@ namespace ServerSync
 
 		private class PackageEntry
 		{
-			public string section =  null!;
+			public string section = null!;
 			public string key = null!;
 			public Type type = null!;
 			public object? value;
 		}
-		
+
 		private void Broadcast(long target, params ConfigEntryBase[] configs)
 		{
 			if (!IsLocked || isServer)
@@ -794,7 +802,7 @@ namespace ServerSync
 		{
 			return config.Description.Tags?.OfType<OwnConfigEntryBase>().SingleOrDefault();
 		}
-		
+
 		private static T configAttribute<T>(ConfigEntryBase config)
 		{
 			return config.Description.Tags.OfType<T>().First();
@@ -813,7 +821,7 @@ namespace ServerSync
 				{
 					return true;
 				}
-				
+
 				__result = TomlTypeConverter.ConvertToString(data.LocalBaseValue, __instance.SettingType);
 				return false;
 			}
@@ -828,14 +836,14 @@ namespace ServerSync
 				{
 					return true;
 				}
-				
+
 				try
 				{
 					data.LocalBaseValue = TomlTypeConverter.ConvertToValue(value, __instance.SettingType);
 				}
 				catch (Exception e)
 				{
-					Debug.LogWarning( $"Config value of setting \"{__instance.Definition}\" could not be parsed and will be ignored. Reason: {e.Message}; Value: {value}");
+					Debug.LogWarning($"Config value of setting \"{__instance.Definition}\" could not be parsed and will be ignored. Reason: {e.Message}; Value: {value}");
 				}
 				return false;
 			}
@@ -854,11 +862,11 @@ namespace ServerSync
 			}
 			foreach (CustomSyncedValueBase customValue in customValueList)
 			{
-				AddEntryToPackage(package, new PackageEntry {section = "Internal", key = customValue.Identifier, type = customValue.Type, value = customValue.BoxedValue });
+				AddEntryToPackage(package, new PackageEntry { section = "Internal", key = customValue.Identifier, type = customValue.Type, value = customValue.BoxedValue });
 			}
 			foreach (ConfigEntryBase config in configList)
 			{
-				AddEntryToPackage(package, new PackageEntry {section = config.Definition.Section, key = config.Definition.Key, type = configType(config), value = config.BoxedValue});
+				AddEntryToPackage(package, new PackageEntry { section = config.Definition.Section, key = config.Definition.Key, type = configType(config), value = config.BoxedValue });
 			}
 
 			return package;
@@ -876,18 +884,18 @@ namespace ServerSync
 		{
 			if (value is Enum)
 			{
-				value = ((IConvertible) value).ToType(Enum.GetUnderlyingType(value.GetType()), CultureInfo.InvariantCulture);
+				value = ((IConvertible)value).ToType(Enum.GetUnderlyingType(value.GetType()), CultureInfo.InvariantCulture);
 			}
-			
-			ZRpc.Serialize(new []{value}, ref package);
+
+			ZRpc.Serialize(new[] { value }, ref package);
 		}
-		
+
 		private static object ReadValueWithTypeFromZPackage(ZPackage package, Type type)
 		{
 			ParameterInfo param = (ParameterInfo)FormatterServices.GetUninitializedObject(typeof(ParameterInfo));
 			AccessTools.DeclaredField(typeof(ParameterInfo), "ClassImpl").SetValue(param, type);
 			List<object> data = new();
-			ZRpc.Deserialize(new []{null, param}, package, ref data);
+			ZRpc.Deserialize(new[] { null, param }, package, ref data);
 			return data.First();
 		}
 	}
