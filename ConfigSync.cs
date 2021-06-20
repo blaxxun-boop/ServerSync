@@ -661,14 +661,14 @@ namespace ServerSync
 				writers.RemoveAll(writer => !writer.MoveNext());
 			}
 		}
-		
-		[HarmonyPatch(typeof(ZNet), "SendPeerInfo")]
-		private class BufferPeerInfoSending
+
+		[HarmonyPatch(typeof(ZNet), "RPC_PeerInfo")]
+		private class SendConfigsAfterLogin
 		{
-			public class BufferingSocket : ISocket
+			private class BufferingSocket : ISocket
 			{
 				public bool finished = false;
-				public ZPackage? Package;
+				public readonly List<ZPackage> Package = new();
 				public readonly ISocket Original;
 
 				public BufferingSocket(ISocket original)
@@ -696,9 +696,9 @@ namespace ServerSync
 				{
 					pkg.SetPos(0);
 					int methodHash = pkg.ReadInt();
-					if (methodHash == "PeerInfo".GetStableHashCode() && !finished)
+					if ((methodHash == "PeerInfo".GetStableHashCode() || methodHash == "RoutedRPC".GetStableHashCode()) && !finished)
 					{
-						Package = new ZPackage(pkg.GetArray()); // the original ZPackage gets reused, create a new one
+						Package.Add(new ZPackage(pkg.GetArray())); // the original ZPackage gets reused, create a new one
 					}
 					else
 					{
@@ -706,40 +706,24 @@ namespace ServerSync
 					}
 				}
 			}
-			
-			[HarmonyPriority(Priority.Last)]
-			public static void Prefix(ZNet __instance, ZRpc rpc)
+
+			[HarmonyPriority(Priority.First)]
+			private static void Prefix(ref BufferingSocket __state, ZNet __instance, ZRpc rpc)
 			{
 				if (__instance.IsServer())
 				{
-					BufferingSocket bufferingSocket = SendConfigsAfterLogin.currentBufferingSocket = new(rpc.GetSocket());
-					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket);
+					__state = new(rpc.GetSocket());
+					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, __state);
 				}
 			}
 
-			[HarmonyPriority(Priority.First)]
-			private static void Postfix(ZRpc rpc)
-			{
-				if (rpc.GetSocket() is BufferingSocket bufferingSocket)
-				{
-					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket.Original);
-				}
-			}
-		}
-
-		[HarmonyPatch(typeof(ZNet), "RPC_PeerInfo")]
-		private class SendConfigsAfterLogin
-		{
-			public static BufferPeerInfoSending.BufferingSocket currentBufferingSocket = null!;
-			
-			private static void Postfix(ZNet __instance, ZRpc rpc)
+			private static void Postfix(BufferingSocket __state, ZNet __instance, ZRpc rpc)
 			{
 				if (!__instance.IsServer())
 				{
 					return;
 				}
 
-				BufferPeerInfoSending.BufferingSocket bufferingSocket = currentBufferingSocket;
 				ZNetPeer peer = (ZNetPeer) AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] {typeof(ZRpc)}).Invoke(__instance, new object[] {rpc});
 				
 				IEnumerator sendAsync()
@@ -764,10 +748,15 @@ namespace ServerSync
 						yield return __instance.StartCoroutine(configSync.sendZPackage(new List<ZNetPeer> { peer }, package));
 					}
 
-					bufferingSocket.finished = true;
-					if (bufferingSocket.Package != null)
+					if (rpc.GetSocket() is BufferingSocket bufferingSocket)
 					{
-						bufferingSocket.Original.Send(bufferingSocket.Package);
+						AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket.Original);
+					}
+
+					__state.finished = true;
+					foreach (ZPackage package in __state.Package)
+					{
+						__state.Original.Send(package);
 					}
 				}
 
