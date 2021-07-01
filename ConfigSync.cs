@@ -144,7 +144,7 @@ namespace ServerSync
 		{
 			BepInEx.ThreadingHelper.Instance.StartSyncInvoke(() =>
 			{
-				if (PatchProcessor.GetPatchInfo(AccessTools.DeclaredMethod(typeof(ZNet), "Awake")).Postfixes.Count(p => p.PatchMethod.DeclaringType == typeof(RegisterRPCPatch)) > 0)
+				if (PatchProcessor.GetPatchInfo(AccessTools.DeclaredMethod(typeof(ZNet), "Awake"))?.Postfixes.Count(p => p.PatchMethod.DeclaringType == typeof(RegisterRPCPatch)) > 0)
 				{
 					return;
 				}
