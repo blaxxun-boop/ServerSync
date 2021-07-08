@@ -6,7 +6,6 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
-using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
 using BepInEx.Configuration;
 using HarmonyLib;
@@ -32,7 +31,23 @@ namespace ServerSync
 			SourceConfig = sourceConfig;
 		}
 
-		public T Value => SourceConfig.Value;
+		public T Value
+		{
+			get => SourceConfig.Value;
+			set => SourceConfig.Value = value;
+		}
+		
+		public void AssignLocalValue(T value)
+		{
+			if (LocalBaseValue == null)
+			{
+				Value = value;
+			}
+			else
+			{
+				LocalBaseValue = value;
+			}
+		}
 	}
 
 	public abstract class CustomSyncedValueBase
@@ -801,6 +816,11 @@ namespace ServerSync
 		private static OwnConfigEntryBase? configData(ConfigEntryBase config)
 		{
 			return config.Description.Tags?.OfType<OwnConfigEntryBase>().SingleOrDefault();
+		}
+
+		public static SyncedConfigEntry<T>? ConfigData<T>(ConfigEntry<T> config)
+		{
+			return config.Description.Tags?.OfType<SyncedConfigEntry<T>>().SingleOrDefault();
 		}
 
 		private static T configAttribute<T>(ConfigEntryBase config)
