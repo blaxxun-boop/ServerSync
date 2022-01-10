@@ -9,6 +9,7 @@ using System.Reflection;
 using System.Runtime.Serialization;
 using BepInEx.Configuration;
 using HarmonyLib;
+using JetBrains.Annotations;
 using UnityEngine;
 
 namespace ServerSync
@@ -21,6 +22,7 @@ namespace ServerSync
 		public bool SynchronizedConfig = true;
 	}
 
+	[PublicAPI]
 	public class SyncedConfigEntry<T> : OwnConfigEntryBase
 	{
 		public override ConfigEntryBase BaseConfig => SourceConfig;
@@ -36,7 +38,7 @@ namespace ServerSync
 			get => SourceConfig.Value;
 			set => SourceConfig.Value = value;
 		}
-		
+
 		public void AssignLocalValue(T value)
 		{
 			if (LocalBaseValue == null)
@@ -83,6 +85,7 @@ namespace ServerSync
 		}
 	}
 
+	[PublicAPI]
 	public sealed class CustomSyncedValue<T> : CustomSyncedValueBase
 	{
 		public T Value
@@ -114,6 +117,7 @@ namespace ServerSync
 		public bool? ReadOnly = false;
 	}
 
+	[PublicAPI]
 	public class ConfigSync
 	{
 		public static bool ProcessingServerUpdate = false;
@@ -123,7 +127,13 @@ namespace ServerSync
 		public string? CurrentVersion;
 		public string? MinimumRequiredVersion;
 
-		public bool IsLocked => lockedConfig != null && ((IConvertible)lockedConfig.BaseConfig.BoxedValue).ToInt32(CultureInfo.InvariantCulture) != 0 && !lockExempt;
+		private bool? forceConfigLocking;
+
+		public bool IsLocked
+		{
+			get => (forceConfigLocking ?? lockedConfig != null && ((IConvertible)lockedConfig.BaseConfig.BoxedValue).ToInt32(CultureInfo.InvariantCulture) != 0) && !lockExempt;
+			set => forceConfigLocking = value;
+		}
 
 		private bool isSourceOfTruth = true;
 
@@ -183,7 +193,7 @@ namespace ServerSync
 			if (configData(configEntry) is not SyncedConfigEntry<T> syncedEntry)
 			{
 				syncedEntry = new SyncedConfigEntry<T>(configEntry);
-				AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[] { new ConfigurationManagerAttributes() }.Concat(configEntry.Description.Tags ?? new object[0]).Concat(new[] { syncedEntry }).ToArray());
+				AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[] { new ConfigurationManagerAttributes() }.Concat(configEntry.Description.Tags ?? Array.Empty<object>()).Concat(new[] { syncedEntry }).ToArray());
 				configEntry.SettingChanged += (_, _) =>
 				{
 					if (!ProcessingServerUpdate)
@@ -412,7 +422,7 @@ namespace ServerSync
 			Dictionary<string, CustomSyncedValueBase> customValueMap = allCustomValues.ToDictionary(c => c.Identifier, c => c);
 
 			int valueCount = package.ReadInt();
-			for (int i = 0; i < valueCount; i++)
+			for (int i = 0; i < valueCount; ++i)
 			{
 				string groupName = package.ReadString();
 				string configName = package.ReadString();
@@ -421,7 +431,16 @@ namespace ServerSync
 				Type? type = Type.GetType(typeName);
 				if (typeName == "" || type != null)
 				{
-					object? value = typeName == "" ? null : ReadValueWithTypeFromZPackage(package, type!);
+					object? value;
+					try
+					{
+						value = typeName == "" ? null : ReadValueWithTypeFromZPackage(package, type!);
+					}
+					catch (InvalidDeserializationTypeException e)
+					{
+						Debug.LogWarning($"Got unexpected struct internal type {e.received} for field {e.field} struct {typeName} for {configName} in section {groupName} for mod {DisplayName ?? Name}, expecting {e.expected}");
+						continue;
+					}
 					if (groupName == "Internal")
 					{
 						if (configName == "serverversion")
@@ -433,8 +452,10 @@ namespace ServerSync
 						}
 						else if (configName == "requiredversion")
 						{
+							// ReSharper disable RedundantNameQualifier
 							if (CurrentVersion == null || new System.Version(value?.ToString() ?? "0.0.0") > new System.Version(CurrentVersion))
 							{
+								// ReSharper restore RedundantNameQualifier
 								Debug.LogError($"Received minimum version is higher than required version: minimum required version = {value?.ToString() ?? "0.0.0"}; local version = {CurrentVersion ?? "unknown"}");
 								Game.instance.Logout();
 								AccessTools.DeclaredField(typeof(ZNet), "m_connectionStatus").SetValue(null, ZNet.ConnectionStatus.ErrorVersion);
@@ -450,7 +471,7 @@ namespace ServerSync
 						}
 						else if (customValueMap.TryGetValue(configName, out CustomSyncedValueBase config))
 						{
-							if ((typeName == "" && (!config.Type.IsValueType || Nullable.GetUnderlyingType(config.Type) != null)) || config.Type.AssemblyQualifiedName == typeName)
+							if ((typeName == "" && (!config.Type.IsValueType || Nullable.GetUnderlyingType(config.Type) != null)) || GetZPackageTypeString(config.Type) == typeName)
 							{
 								configs.customValues[config] = value;
 							}
@@ -463,7 +484,7 @@ namespace ServerSync
 					else if (configMap.TryGetValue(groupName + "_" + configName, out OwnConfigEntryBase config))
 					{
 						Type expectedType = configType(config.BaseConfig);
-						if ((typeName == "" && (!expectedType.IsValueType || Nullable.GetUnderlyingType(expectedType) != null)) || expectedType.AssemblyQualifiedName == typeName)
+						if ((typeName == "" && (!expectedType.IsValueType || Nullable.GetUnderlyingType(expectedType) != null)) || GetZPackageTypeString(expectedType) == typeName)
 						{
 							configs.configValues[config] = value;
 						}
@@ -499,7 +520,7 @@ namespace ServerSync
 			}
 		}
 
-		[HarmonyPatch(typeof(ZNet), nameof(ZNet.Shutdown))]
+		[HarmonyPatch(typeof(ZNet), "Shutdown")]
 		private class ResetConfigsOnShutdown
 		{
 			private static void Postfix()
@@ -515,7 +536,7 @@ namespace ServerSync
 
 		private static bool isWritableConfig(OwnConfigEntryBase config)
 		{
-			if (!(configSyncs.FirstOrDefault(cs => cs.allConfigs.Contains(config)) is ConfigSync configSync))
+			if (configSyncs.FirstOrDefault(cs => cs.allConfigs.Contains(config)) is not { } configSync)
 			{
 				return true;
 			}
@@ -554,7 +575,7 @@ namespace ServerSync
 
 		private IEnumerator<bool> distributeConfigToPeers(ZNetPeer peer, ZPackage package)
 		{
-			if (ZRoutedRpc.instance is not ZRoutedRpc rpc)
+			if (ZRoutedRpc.instance is not { } rpc)
 			{
 				yield break;
 			}
@@ -592,11 +613,11 @@ namespace ServerSync
 				}
 			}
 
-			if (package.GetArray() is byte[] { LongLength: > packageSliceSize } data)
+			if (package.GetArray() is { LongLength: > packageSliceSize } data)
 			{
 				int fragments = (int)(1 + (data.LongLength - 1) / packageSliceSize);
 				long packageIdentifier = ++packageCounter;
-				for (int fragment = 0; fragment < fragments; fragment++)
+				for (int fragment = 0; fragment < fragments; ++fragment)
 				{
 					foreach (bool wait in waitForQueue())
 					{
@@ -658,7 +679,7 @@ namespace ServerSync
 
 			const int compressMinSize = 10000;
 
-			if (package.GetArray() is byte[] { LongLength: > compressMinSize } rawData)
+			if (package.GetArray() is { LongLength: > compressMinSize } rawData)
 			{
 				ZPackage compressedPackage = new();
 				compressedPackage.Write(COMPRESSED_CONFIG);
@@ -832,12 +853,12 @@ namespace ServerSync
 
 		private static Type configType(Type type) => type.IsEnum ? Enum.GetUnderlyingType(type) : type;
 
-		[HarmonyPatch(typeof(ConfigEntryBase), "GetSerializedValue")]
+		[HarmonyPatch(typeof(ConfigEntryBase), nameof(ConfigEntryBase.GetSerializedValue))]
 		private static class PreventSavingServerInfo
 		{
 			private static bool Prefix(ConfigEntryBase __instance, ref string __result)
 			{
-				if (!(configData(__instance) is OwnConfigEntryBase data) || isWritableConfig(data))
+				if (configData(__instance) is not { } data || isWritableConfig(data))
 				{
 					return true;
 				}
@@ -847,12 +868,12 @@ namespace ServerSync
 			}
 		}
 
-		[HarmonyPatch(typeof(ConfigEntryBase), "SetSerializedValue")]
+		[HarmonyPatch(typeof(ConfigEntryBase), nameof(ConfigEntryBase.SetSerializedValue))]
 		private static class PreventConfigRereadChangingValues
 		{
 			private static bool Prefix(ConfigEntryBase __instance, string value)
 			{
-				if (!(configData(__instance) is OwnConfigEntryBase data) || data.LocalBaseValue == null)
+				if (configData(__instance) is not { } data || data.LocalBaseValue == null)
 				{
 					return true;
 				}
@@ -876,7 +897,7 @@ namespace ServerSync
 			ZPackage package = new();
 			package.Write(partial ? PARTIAL_CONFIGS : (byte)0);
 			package.Write(configList.Count + customValueList.Count + (packageEntries?.Count() ?? 0));
-			foreach (PackageEntry packageEntry in packageEntries ?? new PackageEntry[0])
+			foreach (PackageEntry packageEntry in packageEntries ?? Array.Empty<PackageEntry>())
 			{
 				AddEntryToPackage(package, packageEntry);
 			}
@@ -896,15 +917,38 @@ namespace ServerSync
 		{
 			package.Write(entry.section);
 			package.Write(entry.key);
-			package.Write(entry.value == null ? "" : entry.type.AssemblyQualifiedName);
+			package.Write(entry.value == null ? "" : GetZPackageTypeString(entry.type));
 			AddValueToZPackage(package, entry.value);
 		}
 
+		private static string GetZPackageTypeString(Type type) => type.AssemblyQualifiedName!;
+
 		private static void AddValueToZPackage(ZPackage package, object? value)
 		{
+			Type? type = value?.GetType();
 			if (value is Enum)
 			{
 				value = ((IConvertible)value).ToType(Enum.GetUnderlyingType(value.GetType()), CultureInfo.InvariantCulture);
+			}
+			else if (value is ICollection collection)
+			{
+				package.Write(collection.Count);
+				foreach (object item in collection)
+				{
+					AddValueToZPackage(package, item);
+				}
+				return;
+			}
+			else if (type is { IsValueType: true, IsPrimitive: false })
+			{
+				FieldInfo[] fields = type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+				package.Write(fields.Length);
+				foreach (FieldInfo field in fields)
+				{
+					package.Write(GetZPackageTypeString(field.FieldType));
+					AddValueToZPackage(package, field.GetValue(value));
+				}
+				return;
 			}
 
 			ZRpc.Serialize(new[] { value }, ref package);
@@ -912,11 +956,65 @@ namespace ServerSync
 
 		private static object ReadValueWithTypeFromZPackage(ZPackage package, Type type)
 		{
+			if (type is { IsValueType: true, IsPrimitive: false, IsEnum: false })
+			{
+				FieldInfo[] fields = type.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic);
+				int fieldCount = package.ReadInt();
+				if (fieldCount != fields.Length)
+				{
+					throw new InvalidDeserializationTypeException { received = $"(field count: {fieldCount})", expected = $"(field count: {fields.Length})" };
+				}
+
+				object value = FormatterServices.GetUninitializedObject(type);
+				foreach (FieldInfo field in fields)
+				{
+					string typeName = package.ReadString();
+					if (typeName != GetZPackageTypeString(field.FieldType))
+					{
+						throw new InvalidDeserializationTypeException { received = typeName, expected = GetZPackageTypeString(field.FieldType), field = field.Name };
+					}
+					field.SetValue(value, ReadValueWithTypeFromZPackage(package, field.FieldType));
+				}
+				return value;
+			}
+			if (type.IsGenericType && type.GetGenericTypeDefinition() == typeof(Dictionary<,>))
+			{
+				int entriesCount = package.ReadInt();
+				IDictionary dict = (IDictionary)Activator.CreateInstance(type);
+				Type kvType = typeof(KeyValuePair<,>).MakeGenericType(type.GenericTypeArguments);
+				FieldInfo keyField = kvType.GetField("key", BindingFlags.NonPublic | BindingFlags.Instance)!;
+				FieldInfo valueField = kvType.GetField("value", BindingFlags.NonPublic | BindingFlags.Instance)!;
+				for (int i = 0; i < entriesCount; ++i)
+				{
+					object kv = ReadValueWithTypeFromZPackage(package, kvType);
+					dict.Add(keyField.GetValue(kv), valueField.GetValue(kv));
+				}
+				return dict;
+			}
+			if (type != typeof(List<string>) && type.IsGenericType && typeof(ICollection<>).MakeGenericType(type.GenericTypeArguments[0]) is { } collectionType && collectionType.IsAssignableFrom(type.GetGenericTypeDefinition()))
+			{
+				int entriesCount = package.ReadInt();
+				object list = Activator.CreateInstance(type);
+				MethodInfo adder = collectionType.GetMethod("Add")!;
+				for (int i = 0; i < entriesCount; ++i)
+				{
+					adder.Invoke(list, new[] { ReadValueWithTypeFromZPackage(package, type.GenericTypeArguments[0]) });
+				}
+				return list;
+			}
+
 			ParameterInfo param = (ParameterInfo)FormatterServices.GetUninitializedObject(typeof(ParameterInfo));
 			AccessTools.DeclaredField(typeof(ParameterInfo), "ClassImpl").SetValue(param, type);
 			List<object> data = new();
 			ZRpc.Deserialize(new[] { null, param }, package, ref data);
 			return data.First();
+		}
+
+		private class InvalidDeserializationTypeException : Exception
+		{
+			public string expected = null!;
+			public string received = null!;
+			public string field = "";
 		}
 	}
 }
