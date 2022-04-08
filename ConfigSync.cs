@@ -114,7 +114,7 @@ public sealed class CustomSyncedValue<T> : CustomSyncedValueBase
 
 internal class ConfigurationManagerAttributes
 {
-	public bool? ReadOnly = false;
+	[UsedImplicitly] public bool? ReadOnly = false;
 }
 
 [PublicAPI]
@@ -198,7 +198,7 @@ public class ConfigSync
 			AccessTools.DeclaredField(typeof(ConfigDescription), "<Tags>k__BackingField").SetValue(configEntry.Description, new object[] { new ConfigurationManagerAttributes() }.Concat(configEntry.Description.Tags ?? Array.Empty<object>()).Concat(new[] { syncedEntry }).ToArray());
 			configEntry.SettingChanged += (_, _) =>
 			{
-				if (!ProcessingServerUpdate)
+				if (!ProcessingServerUpdate && syncedEntry.SynchronizedConfig)
 				{
 					Broadcast(ZRoutedRpc.Everybody, configEntry);
 				}
