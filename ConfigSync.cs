@@ -775,7 +775,7 @@ public class ConfigSync
 			{
 				pkg.SetPos(0);
 				int methodHash = pkg.ReadInt();
-				if ((methodHash == "PeerInfo".GetStableHashCode() || methodHash == "RoutedRPC".GetStableHashCode()) && !finished)
+				if ((methodHash == "PeerInfo".GetStableHashCode() || methodHash == "RoutedRPC".GetStableHashCode() || methodHash == "ZDOData".GetStableHashCode()) && !finished)
 				{
 					Package.Add(new ZPackage(pkg.GetArray())); // the original ZPackage gets reused, create a new one
 				}
