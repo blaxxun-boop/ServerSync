@@ -126,11 +126,6 @@ public class VersionCheck
 	{
 		return versionChecks.Where(check => !check.ValidatedClients.Contains(rpc)).ToArray();
 	}
-	
-	private static VersionCheck[] GetFailed(ZRpc? rpc = null)
-	{
-		return rpc == null ? GetFailedClient() : GetFailedServer(rpc);
-	}
 
 	private static void Logout()
 	{
@@ -155,11 +150,11 @@ public class VersionCheck
 			var currentVersion = pkg.ReadString();
 			if (ZNet.instance.IsServer())
 			{
-				Debug.Log($"Received '{check.DisplayName} version {currentVersion} and minimum version {minimumRequiredVersion} from the client.");
+				Debug.Log($"Received {check.DisplayName} version {currentVersion} and minimum version {minimumRequiredVersion} from the client.");
 			}
 			else
 			{
-				Debug.Log($"Received '{check.DisplayName} version {currentVersion} and minimum version {minimumRequiredVersion} from the server.");
+				Debug.Log($"Received {check.DisplayName} version {currentVersion} and minimum version {minimumRequiredVersion} from the server.");
 			}
 			check.ReceivedMinimumRequiredVersion = minimumRequiredVersion;
 			check.ReceivedCurrentVersion = currentVersion;
@@ -175,7 +170,7 @@ public class VersionCheck
 		{
 			return true;
 		}
-		var failedChecks = GetFailed();
+		var failedChecks = GetFailedClient();
 		if (failedChecks.Length == 0)
 		{
 			return true;
@@ -193,7 +188,7 @@ public class VersionCheck
 		{
 			return true;
 		}
-		var failedChecks = GetFailed(rpc);
+		var failedChecks = GetFailedServer(rpc);
 		if (failedChecks.Length == 0)
 		{
 			return true;
@@ -218,7 +213,12 @@ public class VersionCheck
 		foreach (var check in versionChecks)
 		{
 			check.Initialize();
-			peer.m_rpc.Register<ZPackage>($"VersionCheck_{check.Name}", new Action<ZRpc, ZPackage>(VersionCheck.CheckVersion));
+			peer.m_rpc.Register<ZPackage>($"VersionCheck_{check.Name}", (ZRpc rpc, ZPackage pkg) => VersionCheck.CheckVersion(check.Name, rpc, pkg));
+			// If the mod is not required, then it's enough for only one side to do the check.
+			if (!check.ModRequired && !__instance.IsServer())
+			{
+				return continue;
+			}
 			if (__instance.IsServer())
 			{
 				Debug.Log($"Sending {check.DisplayName} version {check.CurrentVersion} and minimum version {check.MinimumRequiredVersion} to the client");
@@ -256,7 +256,7 @@ public class VersionCheck
 		{
 			return;
 		}
-		var failedChecks = GetFailed();
+		var failedChecks = GetFailedClient();
 		if (failedChecks.Length == 0)
 		{
 			return;
