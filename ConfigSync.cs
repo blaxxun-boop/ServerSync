@@ -6,7 +6,9 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Reflection;
+using System.Runtime.CompilerServices;
 using System.Runtime.Serialization;
+using BepInEx;
 using BepInEx.Configuration;
 using HarmonyLib;
 using JetBrains.Annotations;
@@ -14,6 +16,7 @@ using UnityEngine;
 
 namespace ServerSync;
 
+[PublicAPI]
 public abstract class OwnConfigEntryBase
 {
 	public object? LocalBaseValue;
@@ -169,26 +172,14 @@ public class ConfigSync
 
 	static ConfigSync()
 	{
-		BepInEx.ThreadingHelper.Instance.StartSyncInvoke(() =>
-		{
-			if (PatchProcessor.GetPatchInfo(AccessTools.DeclaredMethod(typeof(ZNet), "Awake"))?.Postfixes.Count(p => p.PatchMethod.DeclaringType == typeof(RegisterRPCPatch)) > 0)
-			{
-				return;
-			}
-
-			Harmony harmony = new("org.bepinex.helpers.ServerSync");
-			foreach (Type type in typeof(ConfigSync).GetNestedTypes(BindingFlags.NonPublic).Where(t => t.IsClass))
-			{
-				harmony.PatchAll(type);
-			}
-		});
+		RuntimeHelpers.RunClassConstructor(typeof(VersionCheck).TypeHandle);
 	}
 
 	public ConfigSync(string name)
 	{
 		Name = name;
 		configSyncs.Add(this);
-		new VersionCheck(this);
+		_ = new VersionCheck(this);
 	}
 
 	public SyncedConfigEntry<T> AddConfigEntry<T>(ConfigEntry<T> configEntry)
@@ -245,12 +236,14 @@ public class ConfigSync
 	{
 		public static ZRpc? currentRpc;
 
+		[HarmonyPrefix]
 		private static void Prefix(ZRpc __instance) => currentRpc = __instance;
 	}
 
 	[HarmonyPatch(typeof(ZNet), "Awake")]
-	private static class RegisterRPCPatch
+	internal static class RegisterRPCPatch
 	{
+		[HarmonyPostfix]
 		private static void Postfix(ZNet __instance)
 		{
 
@@ -308,6 +301,7 @@ public class ConfigSync
 	[HarmonyPatch(typeof(ZNet), "OnNewConnection")]
 	private static class RegisterClientRPCPatch
 	{
+		[HarmonyPostfix]
 		private static void Postfix(ZNet __instance, ZNetPeer peer)
 		{
 			if (!__instance.IsServer())
@@ -539,6 +533,7 @@ public class ConfigSync
 	[HarmonyPatch(typeof(ZNet), "Shutdown")]
 	private class ResetConfigsOnShutdown
 	{
+		[HarmonyPostfix]
 		private static void Postfix()
 		{
 			ProcessingServerUpdate = true;
@@ -763,6 +758,7 @@ public class ConfigSync
 		}
 
 		[HarmonyPriority(Priority.First)]
+		[HarmonyPrefix]
 		private static void Prefix(ref Dictionary<Assembly, BufferingSocket>? __state, ZNet __instance, ZRpc rpc)
 		{
 			if (__instance.IsServer())
@@ -775,6 +771,7 @@ public class ConfigSync
 			}
 		}
 
+		[HarmonyPostfix]
 		private static void Postfix(Dictionary<Assembly, BufferingSocket> __state, ZNet __instance, ZRpc rpc)
 		{
 			if (!__instance.IsServer())
@@ -877,6 +874,7 @@ public class ConfigSync
 	[HarmonyPatch(typeof(ConfigEntryBase), nameof(ConfigEntryBase.GetSerializedValue))]
 	private static class PreventSavingServerInfo
 	{
+		[HarmonyPrefix]
 		private static bool Prefix(ConfigEntryBase __instance, ref string __result)
 		{
 			if (configData(__instance) is not { } data || isWritableConfig(data))
@@ -892,6 +890,7 @@ public class ConfigSync
 	[HarmonyPatch(typeof(ConfigEntryBase), nameof(ConfigEntryBase.SetSerializedValue))]
 	private static class PreventConfigRereadChangingValues
 	{
+		[HarmonyPrefix]
 		private static bool Prefix(ConfigEntryBase __instance, string value)
 		{
 			if (configData(__instance) is not { } data || data.LocalBaseValue == null)
@@ -1036,5 +1035,251 @@ public class ConfigSync
 		public string expected = null!;
 		public string received = null!;
 		public string field = "";
+	}
+}
+
+[PublicAPI]
+[HarmonyPatch]
+public class VersionCheck
+{
+	private static readonly HashSet<VersionCheck> versionChecks = new();
+
+	public string Name;
+
+	private string? displayName;
+
+	public string DisplayName
+	{
+		get => displayName ?? Name;
+		set => displayName = value;
+	}
+
+	private string? currentVersion;
+
+	public string CurrentVersion
+	{
+		get => currentVersion ?? "0.0.0";
+		set => currentVersion = value;
+	}
+
+	private string? minimumRequiredVersion;
+
+	public string MinimumRequiredVersion
+	{
+		get => minimumRequiredVersion ?? (ModRequired ? CurrentVersion : "0.0.0");
+		set => minimumRequiredVersion = value;
+	}
+
+	public bool ModRequired = true;
+
+	private string? ReceivedCurrentVersion;
+
+	private string? ReceivedMinimumRequiredVersion;
+
+	// Tracks which clients have passed the version check (only for servers).
+	private readonly List<ZRpc> ValidatedClients = new();
+
+	// Optional backing field to use ConfigSync values (will override other fields).
+	private ConfigSync? ConfigSync;
+
+	private static void PatchServerSync()
+	{
+		if (PatchProcessor.GetPatchInfo(AccessTools.DeclaredMethod(typeof(ZNet), "Awake"))?.Postfixes.Count(p => p.PatchMethod.DeclaringType == typeof(ConfigSync.RegisterRPCPatch)) > 0)
+		{
+			return;
+		}
+
+		Harmony harmony = new("org.bepinex.helpers.ServerSync");
+		foreach (Type type in typeof(ConfigSync).GetNestedTypes(BindingFlags.NonPublic).Concat(new[] { typeof(VersionCheck) }).Where(t => t.IsClass))
+		{
+			harmony.PatchAll(type);
+		}
+	}
+
+	static VersionCheck()
+	{
+		typeof(ThreadingHelper).GetMethod("StartSyncInvoke")!.Invoke(ThreadingHelper.Instance, new object[] { (Action)PatchServerSync });
+	}
+
+	public VersionCheck(string name)
+	{
+		Name = name;
+		ModRequired = true;
+		versionChecks.Add(this);
+	}
+
+	public VersionCheck(ConfigSync configSync)
+	{
+		ConfigSync = configSync;
+		Name = ConfigSync.Name;
+		versionChecks.Add(this);
+	}
+
+	public void Initialize()
+	{
+		ReceivedCurrentVersion = null;
+		ReceivedMinimumRequiredVersion = null;
+		if (ConfigSync == null)
+		{
+			return;
+		}
+		Name = ConfigSync.Name;
+		DisplayName = ConfigSync.DisplayName!;
+		CurrentVersion = ConfigSync.CurrentVersion!;
+		MinimumRequiredVersion = ConfigSync.MinimumRequiredVersion!;
+		ModRequired = ConfigSync.ModRequired;
+	}
+
+	private bool IsVersionOk()
+	{
+		if (ReceivedMinimumRequiredVersion == null)
+		{
+			return !ModRequired;
+		}
+		bool myVersionOk = new Version(CurrentVersion) >= new Version(ReceivedMinimumRequiredVersion);
+		bool otherVersionOk = new Version(ReceivedCurrentVersion!) >= new Version(MinimumRequiredVersion);
+		return myVersionOk && otherVersionOk;
+	}
+
+	private string ErrorClient()
+	{
+		if (ReceivedMinimumRequiredVersion == null)
+		{
+			return $"Mod {DisplayName} must not be installed.";
+		}
+		bool myVersionOk = new Version(CurrentVersion) >= new Version(ReceivedMinimumRequiredVersion);
+		return myVersionOk ? $"Mod {DisplayName} requires maximum {ReceivedCurrentVersion}. Installed is version {CurrentVersion}." : $"Mod {DisplayName} requires minimum {ReceivedMinimumRequiredVersion}. Installed is version {CurrentVersion}.";
+	}
+
+	private string ErrorServer(ZRpc rpc)
+	{
+		return $"Disconnect: The client ({rpc.GetSocket().GetHostName()}) doesn't have the correct {DisplayName} version {MinimumRequiredVersion}";
+	}
+
+	private string Error(ZRpc? rpc = null)
+	{
+		return rpc == null ? ErrorClient() : ErrorServer(rpc);
+	}
+
+	private static VersionCheck[] GetFailedClient()
+	{
+		return versionChecks.Where(check => !check.IsVersionOk()).ToArray();
+	}
+
+	private static VersionCheck[] GetFailedServer(ZRpc rpc)
+	{
+		return versionChecks.Where(check => !check.ValidatedClients.Contains(rpc)).ToArray();
+	}
+
+	private static void Logout()
+	{
+		Game.instance.Logout();
+		AccessTools.DeclaredField(typeof(ZNet), "m_connectionStatus").SetValue(null, ZNet.ConnectionStatus.ErrorVersion);
+	}
+
+	private static void DisconnectClient(ZRpc rpc)
+	{
+		rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
+	}
+
+	private static void CheckVersion(ZRpc rpc, ZPackage pkg)
+	{
+		foreach (VersionCheck check in versionChecks)
+		{
+			string guid = pkg.ReadString();
+			if (guid != check.Name)
+			{
+				continue;
+			}
+
+			string minimumRequiredVersion = pkg.ReadString();
+			string currentVersion = pkg.ReadString();
+
+			Debug.Log($"Received {check.DisplayName} version {currentVersion} and minimum version {minimumRequiredVersion} from the {(ZNet.instance.IsServer() ? "client" : "server")}.");
+
+			check.ReceivedMinimumRequiredVersion = minimumRequiredVersion;
+			check.ReceivedCurrentVersion = currentVersion;
+			if (ZNet.instance.IsServer() && check.IsVersionOk())
+			{
+				check.ValidatedClients.Add(rpc);
+			}
+		}
+	}
+
+	[HarmonyPatch(typeof(ZNet), "RPC_PeerInfo"), HarmonyPrefix]
+	private static bool RPC_PeerInfo(ZRpc rpc, ZNet __instance)
+	{
+		VersionCheck[] failedChecks = __instance.IsServer() ? GetFailedServer(rpc) : GetFailedClient();
+		if (failedChecks.Length == 0)
+		{
+			return true;
+		}
+
+		foreach (VersionCheck check in failedChecks)
+		{
+			Debug.LogWarning(check.Error(rpc));
+		}
+
+		if (__instance.IsServer())
+		{
+			DisconnectClient(rpc);
+		}
+		else
+		{
+			Logout();
+		}
+		return false;
+	}
+
+	[HarmonyPatch(typeof(ZNet), "OnNewConnection"), HarmonyPrefix]
+	private static void RegisterAndCheckVersion(ZNetPeer peer, ZNet __instance)
+	{
+		foreach (VersionCheck check in versionChecks)
+		{
+			check.Initialize();
+			peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", CheckVersion);
+			// If the mod is not required, then it's enough for only one side to do the check.
+			if (!check.ModRequired && !__instance.IsServer())
+			{
+				continue;
+			}
+
+			Debug.Log($"Sending {check.DisplayName} version {check.CurrentVersion} and minimum version {check.MinimumRequiredVersion} to the {(__instance.IsServer() ? "server" : "client")}.");
+
+			ZPackage zpackage = new();
+			zpackage.Write(check.Name);
+			zpackage.Write(check.MinimumRequiredVersion);
+			zpackage.Write(check.CurrentVersion);
+			peer.m_rpc.Invoke("ServerSync VersionCheck", zpackage);
+		}
+	}
+
+	[HarmonyPatch(typeof(ZNet), nameof(ZNet.Disconnect)), HarmonyPrefix]
+	private static void RemoveDisconnected(ZNetPeer peer, ZNet __instance)
+	{
+		if (!__instance.IsServer())
+		{
+			return;
+		}
+		foreach (VersionCheck check in versionChecks)
+		{
+			check.ValidatedClients.Remove(peer.m_rpc);
+		}
+	}
+
+	[HarmonyPatch(typeof(FejdStartup), "ShowConnectError"), HarmonyPostfix]
+	private static void ShowConnectionError(FejdStartup __instance)
+	{
+		if (!__instance.m_connectionFailedPanel.activeSelf)
+		{
+			return;
+		}
+		VersionCheck[] failedChecks = GetFailedClient();
+		if (failedChecks.Length == 0)
+		{
+			return;
+		}
+		string error = string.Join("\n", failedChecks.Select(check => check.Error()));
+		__instance.m_connectionFailedError.text += "\n" + error;
 	}
 }
