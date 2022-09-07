@@ -1237,7 +1237,22 @@ public class VersionCheck
 		foreach (VersionCheck check in versionChecks)
 		{
 			check.Initialize();
-			peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", CheckVersion);
+			IDictionary rpcFunctions = (IDictionary)typeof(ZRpc).GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(peer.m_rpc);
+			if (rpcFunctions.Contains("ServerSync VersionCheck".GetStableHashCode()))
+			{
+				object function = rpcFunctions["ServerSync VersionCheck".GetStableHashCode()];
+				Action<ZRpc, ZPackage> action = (Action<ZRpc, ZPackage>)function.GetType().GetField("m_action", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(function);
+				peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", (rpc, pkg) =>
+				{
+					action(rpc, pkg);
+					pkg.SetPos(0);
+					CheckVersion(rpc, pkg);
+				});
+			}
+			else
+			{
+				peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", CheckVersion);
+			}
 			// If the mod is not required, then it's enough for only one side to do the check.
 			if (!check.ModRequired && !__instance.IsServer())
 			{
