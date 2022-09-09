@@ -1168,7 +1168,7 @@ public class VersionCheck
 
 	private static VersionCheck[] GetFailedServer(ZRpc rpc)
 	{
-		return versionChecks.Where(check => !check.ValidatedClients.Contains(rpc)).ToArray();
+		return versionChecks.Where(check => check.ModRequired && !check.ValidatedClients.Contains(rpc)).ToArray();
 	}
 
 	private static void Logout()
@@ -1184,16 +1184,16 @@ public class VersionCheck
 
 	private static void CheckVersion(ZRpc rpc, ZPackage pkg)
 	{
+		string guid = pkg.ReadString();
+		string minimumRequiredVersion = pkg.ReadString();
+		string currentVersion = pkg.ReadString();
+
 		foreach (VersionCheck check in versionChecks)
 		{
-			string guid = pkg.ReadString();
 			if (guid != check.Name)
 			{
 				continue;
 			}
-
-			string minimumRequiredVersion = pkg.ReadString();
-			string currentVersion = pkg.ReadString();
 
 			Debug.Log($"Received {check.DisplayName} version {currentVersion} and minimum version {minimumRequiredVersion} from the {(ZNet.instance.IsServer() ? "client" : "server")}.");
 
@@ -1234,32 +1234,33 @@ public class VersionCheck
 	[HarmonyPatch(typeof(ZNet), "OnNewConnection"), HarmonyPrefix]
 	private static void RegisterAndCheckVersion(ZNetPeer peer, ZNet __instance)
 	{
+		IDictionary rpcFunctions = (IDictionary)typeof(ZRpc).GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(peer.m_rpc);
+		if (rpcFunctions.Contains("ServerSync VersionCheck".GetStableHashCode()))
+		{
+			object function = rpcFunctions["ServerSync VersionCheck".GetStableHashCode()];
+			Action<ZRpc, ZPackage> action = (Action<ZRpc, ZPackage>)function.GetType().GetField("m_action", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(function);
+			peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", (rpc, pkg) =>
+			{
+				action(rpc, pkg);
+				pkg.SetPos(0);
+				CheckVersion(rpc, pkg);
+			});
+		}
+		else
+		{
+			peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", CheckVersion);
+		}
+
 		foreach (VersionCheck check in versionChecks)
 		{
 			check.Initialize();
-			IDictionary rpcFunctions = (IDictionary)typeof(ZRpc).GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(peer.m_rpc);
-			if (rpcFunctions.Contains("ServerSync VersionCheck".GetStableHashCode()))
-			{
-				object function = rpcFunctions["ServerSync VersionCheck".GetStableHashCode()];
-				Action<ZRpc, ZPackage> action = (Action<ZRpc, ZPackage>)function.GetType().GetField("m_action", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(function);
-				peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", (rpc, pkg) =>
-				{
-					action(rpc, pkg);
-					pkg.SetPos(0);
-					CheckVersion(rpc, pkg);
-				});
-			}
-			else
-			{
-				peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", CheckVersion);
-			}
 			// If the mod is not required, then it's enough for only one side to do the check.
 			if (!check.ModRequired && !__instance.IsServer())
 			{
 				continue;
 			}
 
-			Debug.Log($"Sending {check.DisplayName} version {check.CurrentVersion} and minimum version {check.MinimumRequiredVersion} to the {(__instance.IsServer() ? "server" : "client")}.");
+			Debug.Log($"Sending {check.DisplayName} version {check.CurrentVersion} and minimum version {check.MinimumRequiredVersion} to the {(__instance.IsServer() ? "client" : "server")}.");
 
 			ZPackage zpackage = new();
 			zpackage.Write(check.Name);
