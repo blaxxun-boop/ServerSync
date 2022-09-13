@@ -1132,12 +1132,12 @@ public class VersionCheck
 
 	private bool IsVersionOk()
 	{
-		if (ReceivedMinimumRequiredVersion == null)
+		if (ReceivedMinimumRequiredVersion == null || ReceivedCurrentVersion == null)
 		{
 			return !ModRequired;
 		}
 		bool myVersionOk = new Version(CurrentVersion) >= new Version(ReceivedMinimumRequiredVersion);
-		bool otherVersionOk = new Version(ReceivedCurrentVersion!) >= new Version(MinimumRequiredVersion);
+		bool otherVersionOk = new Version(ReceivedCurrentVersion) >= new Version(MinimumRequiredVersion);
 		return myVersionOk && otherVersionOk;
 	}
 
