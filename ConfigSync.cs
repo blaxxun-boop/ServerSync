@@ -744,14 +744,18 @@ public class ConfigSync
 
 			public void Send(ZPackage pkg)
 			{
+				int oldPos = pkg.GetPos();
 				pkg.SetPos(0);
 				int methodHash = pkg.ReadInt();
 				if ((methodHash == "PeerInfo".GetStableHashCode() || methodHash == "RoutedRPC".GetStableHashCode() || methodHash == "ZDOData".GetStableHashCode()) && !finished)
 				{
-					Package.Add(new ZPackage(pkg.GetArray())); // the original ZPackage gets reused, create a new one
+					ZPackage newPkg = new(pkg.GetArray());
+					newPkg.SetPos(oldPos);
+					Package.Add(newPkg); // the original ZPackage gets reused, create a new one
 				}
 				else
 				{
+					pkg.SetPos(oldPos);
 					Original.Send(pkg);
 				}
 			}
@@ -811,7 +815,9 @@ public class ConfigSync
 						entries.Add(new PackageEntry { section = "Internal", key = "serverversion", type = typeof(string), value = configSync.CurrentVersion });
 					}
 
-					entries.Add(new PackageEntry { section = "Internal", key = "lockexempt", type = typeof(bool), value = ((SyncedList)AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance)).Contains(rpc.GetSocket().GetHostName()) });
+					MethodInfo? listContainsId = AccessTools.DeclaredMethod(typeof(ZNet), "ListContainsId");
+					SyncedList adminList = (SyncedList)AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance);
+					entries.Add(new PackageEntry { section = "Internal", key = "lockexempt", type = typeof(bool), value = listContainsId is null ? adminList.Contains(rpc.GetSocket().GetHostName()) : listContainsId.Invoke(ZNet.instance, new object[] { adminList, rpc.GetSocket().GetHostName() }) });
 
 					ZPackage package = ConfigsToPackage(configSync.allConfigs.Select(c => c.BaseConfig), configSync.allCustomValues, entries, false);
 
@@ -1043,6 +1049,7 @@ public class ConfigSync
 public class VersionCheck
 {
 	private static readonly HashSet<VersionCheck> versionChecks = new();
+	private static readonly Dictionary<string, string> notProcessedNames = new();
 
 	public string Name;
 
@@ -1081,7 +1088,7 @@ public class VersionCheck
 
 	// Optional backing field to use ConfigSync values (will override other fields).
 	private ConfigSync? ConfigSync;
-
+	
 	private static void PatchServerSync()
 	{
 		if (PatchProcessor.GetPatchInfo(AccessTools.DeclaredMethod(typeof(ZNet), "Awake"))?.Postfixes.Count(p => p.PatchMethod.DeclaringType == typeof(ConfigSync.RegisterRPCPatch)) > 0)
@@ -1182,11 +1189,14 @@ public class VersionCheck
 		rpc.Invoke("Error", (int)ZNet.ConnectionStatus.ErrorVersion);
 	}
 
-	private static void CheckVersion(ZRpc rpc, ZPackage pkg)
+	private static void CheckVersion(ZRpc rpc, ZPackage pkg) => CheckVersion(rpc, pkg, null);
+	private static void CheckVersion(ZRpc rpc, ZPackage pkg, Action<ZRpc, ZPackage>? original)
 	{
 		string guid = pkg.ReadString();
 		string minimumRequiredVersion = pkg.ReadString();
 		string currentVersion = pkg.ReadString();
+
+		bool matched = false;
 
 		foreach (VersionCheck check in versionChecks)
 		{
@@ -1202,6 +1212,21 @@ public class VersionCheck
 			if (ZNet.instance.IsServer() && check.IsVersionOk())
 			{
 				check.ValidatedClients.Add(rpc);
+			}
+
+			matched = true;
+		}
+
+		if (!matched)
+		{
+			pkg.SetPos(0);
+			if (original is not null)
+			{
+				original(rpc, pkg);
+				if (pkg.GetPos() == 0)
+				{
+					notProcessedNames.Add(guid, currentVersion);
+				}
 			}
 		}
 	}
@@ -1234,17 +1259,14 @@ public class VersionCheck
 	[HarmonyPatch(typeof(ZNet), "OnNewConnection"), HarmonyPrefix]
 	private static void RegisterAndCheckVersion(ZNetPeer peer, ZNet __instance)
 	{
+		notProcessedNames.Clear();
+
 		IDictionary rpcFunctions = (IDictionary)typeof(ZRpc).GetField("m_functions", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(peer.m_rpc);
 		if (rpcFunctions.Contains("ServerSync VersionCheck".GetStableHashCode()))
 		{
 			object function = rpcFunctions["ServerSync VersionCheck".GetStableHashCode()];
 			Action<ZRpc, ZPackage> action = (Action<ZRpc, ZPackage>)function.GetType().GetField("m_action", BindingFlags.Instance | BindingFlags.NonPublic)!.GetValue(function);
-			peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", (rpc, pkg) =>
-			{
-				action(rpc, pkg);
-				pkg.SetPos(0);
-				CheckVersion(rpc, pkg);
-			});
+			peer.m_rpc.Register<ZPackage>("ServerSync VersionCheck", (rpc, pkg) => CheckVersion(rpc, pkg, action));
 		}
 		else
 		{
@@ -1286,16 +1308,23 @@ public class VersionCheck
 	[HarmonyPatch(typeof(FejdStartup), "ShowConnectError"), HarmonyPostfix]
 	private static void ShowConnectionError(FejdStartup __instance)
 	{
-		if (!__instance.m_connectionFailedPanel.activeSelf)
+		if (!__instance.m_connectionFailedPanel.activeSelf || ZNet.GetConnectionStatus() != ZNet.ConnectionStatus.ErrorVersion)
 		{
 			return;
 		}
 		VersionCheck[] failedChecks = GetFailedClient();
-		if (failedChecks.Length == 0)
+		if (failedChecks.Length > 0)
 		{
-			return;
+			string error = string.Join("\n", failedChecks.Select(check => check.Error()));
+			__instance.m_connectionFailedError.text += "\n" + error;
 		}
-		string error = string.Join("\n", failedChecks.Select(check => check.Error()));
-		__instance.m_connectionFailedError.text += "\n" + error;
+
+		foreach (KeyValuePair<string, string> kv in notProcessedNames.OrderBy(kv => kv.Key))
+		{
+			if (!__instance.m_connectionFailedError.text.Contains(kv.Key))
+			{
+				__instance.m_connectionFailedError.text += $"\n{kv.Key} (Version: {kv.Value})";
+			}
+		}
 	}
 }
