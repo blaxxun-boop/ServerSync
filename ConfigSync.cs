@@ -718,6 +718,7 @@ public class ConfigSync
 		private class BufferingSocket : ISocket
 		{
 			public volatile bool finished = false;
+			public volatile int versionMatchQueued = -1;
 			public readonly List<ZPackage> Package = new();
 			public readonly ISocket Original;
 
@@ -741,6 +742,18 @@ public class ConfigSync
 			public int GetHostPort() => Original.GetHostPort();
 			public bool Flush() => Original.Flush();
 			public string GetHostName() => Original.GetHostName();
+
+			public void VersionMatch()
+			{
+				if (finished)
+				{
+					Original.VersionMatch();
+				}
+				else
+				{
+					versionMatchQueued = Package.Count;
+				}
+			}
 
 			public void Send(ZPackage pkg)
 			{
@@ -769,6 +782,9 @@ public class ConfigSync
 			{
 				BufferingSocket bufferingSocket = new(rpc.GetSocket());
 				AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket);
+				ZNetPeer peer = (ZNetPeer)AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] { typeof(ZRpc) }).Invoke(__instance, new object[] { rpc });
+				AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket);
+				AccessTools.DeclaredField(typeof(ZNetPeer), "m_socket").SetValue(peer, bufferingSocket);
 
 				__state ??= new Dictionary<Assembly, BufferingSocket>();
 				__state[Assembly.GetExecutingAssembly()] = bufferingSocket;
@@ -788,14 +804,24 @@ public class ConfigSync
 				if (rpc.GetSocket() is BufferingSocket bufferingSocket)
 				{
 					AccessTools.DeclaredField(typeof(ZRpc), "m_socket").SetValue(rpc, bufferingSocket.Original);
+					ZNetPeer peer = (ZNetPeer)AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] { typeof(ZRpc) }).Invoke(__instance, new object[] { rpc });
+					AccessTools.DeclaredField(typeof(ZNetPeer), "m_socket").SetValue(peer, bufferingSocket.Original);
 				}
 
 				bufferingSocket = __state[Assembly.GetExecutingAssembly()];
 				bufferingSocket.finished = true;
 
-				foreach (ZPackage package in bufferingSocket.Package)
+				for (int i = 0; i < bufferingSocket.Package.Count; ++i)
 				{
-					bufferingSocket.Original.Send(package);
+					if (i == bufferingSocket.versionMatchQueued)
+					{
+						bufferingSocket.Original.VersionMatch();
+					}
+					bufferingSocket.Original.Send(bufferingSocket.Package[i]);
+				}
+				if (bufferingSocket.Package.Count == bufferingSocket.versionMatchQueued)
+				{
+					bufferingSocket.Original.VersionMatch();
 				}
 			}
 
@@ -1088,7 +1114,7 @@ public class VersionCheck
 
 	// Optional backing field to use ConfigSync values (will override other fields).
 	private ConfigSync? ConfigSync;
-	
+
 	private static void PatchServerSync()
 	{
 		if (PatchProcessor.GetPatchInfo(AccessTools.DeclaredMethod(typeof(ZNet), "Awake"))?.Postfixes.Count(p => p.PatchMethod.DeclaringType == typeof(ConfigSync.RegisterRPCPatch)) > 0)
@@ -1190,6 +1216,7 @@ public class VersionCheck
 	}
 
 	private static void CheckVersion(ZRpc rpc, ZPackage pkg) => CheckVersion(rpc, pkg, null);
+
 	private static void CheckVersion(ZRpc rpc, ZPackage pkg, Action<ZRpc, ZPackage>? original)
 	{
 		string guid = pkg.ReadString();
