@@ -64,22 +64,16 @@ public abstract class CustomSyncedValueBase
 	public readonly string Identifier;
 	public readonly Type Type;
 
-	private object? boxedValue;
+	public object? BoxedValue { get; set; }
 
-	public object? BoxedValue
-	{
-		get => boxedValue;
-		set
-		{
-			boxedValue = value;
-			ValueChanged?.Invoke();
-		}
-	}
+	public void Sync() => ValueChanged?.Invoke();
 
 	protected bool localIsOwner;
-
-	protected CustomSyncedValueBase(ConfigSync configSync, string identifier, Type type)
+	public readonly int Priority;
+	
+	protected CustomSyncedValueBase(ConfigSync configSync, string identifier, Type type, int priority = 0)
 	{
+		Priority = priority;
 		Identifier = identifier;
 		Type = type;
 		configSync.AddCustomValue(this);
@@ -163,7 +157,7 @@ public class ConfigSync
 	private static readonly HashSet<ConfigSync> configSyncs = new();
 
 	private readonly HashSet<OwnConfigEntryBase> allConfigs = new();
-	private readonly HashSet<CustomSyncedValueBase> allCustomValues = new();
+	private HashSet<CustomSyncedValueBase> allCustomValues = new();
 
 	private static bool isServer;
 
@@ -224,6 +218,7 @@ public class ConfigSync
 		}
 
 		allCustomValues.Add(customValue);
+		allCustomValues = new HashSet<CustomSyncedValueBase>(allCustomValues.OrderByDescending(v => v.Priority));
 		customValue.ValueChanged += () =>
 		{
 			if (!ProcessingServerUpdate)
@@ -1055,11 +1050,11 @@ public class ConfigSync
 			}
 			return dict;
 		}
-		if (type != typeof(List<string>) && type.IsGenericType && typeof(ICollection<>).MakeGenericType(type.GenericTypeArguments[0]) is { } collectionType && collectionType.IsAssignableFrom(type.GetGenericTypeDefinition()))
+		if (type != typeof(List<string>) && type.IsGenericType && type.GetGenericTypeDefinition() == typeof(List<>))
 		{
 			int entriesCount = package.ReadInt();
 			object list = Activator.CreateInstance(type);
-			MethodInfo adder = collectionType.GetMethod("Add")!;
+			MethodInfo adder = type.GetMethod("Add")!;
 			for (int i = 0; i < entriesCount; ++i)
 			{
 				adder.Invoke(list, new[] { ReadValueWithTypeFromZPackage(package, type.GenericTypeArguments[0]) });
