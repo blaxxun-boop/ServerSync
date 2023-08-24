@@ -71,7 +71,7 @@ public abstract class CustomSyncedValueBase
 	protected bool localIsOwner;
 	public readonly int Priority;
 	
-	protected CustomSyncedValueBase(ConfigSync configSync, string identifier, Type type, int priority = 0)
+	protected CustomSyncedValueBase(ConfigSync configSync, string identifier, Type type, int priority)
 	{
 		Priority = priority;
 		Identifier = identifier;
@@ -91,7 +91,7 @@ public sealed class CustomSyncedValue<T> : CustomSyncedValueBase
 		set => BoxedValue = value;
 	}
 
-	public CustomSyncedValue(ConfigSync configSync, string identifier, T value = default!) : base(configSync, identifier, typeof(T))
+	public CustomSyncedValue(ConfigSync configSync, string identifier, T value = default!, int priority = 0) : base(configSync, identifier, typeof(T), priority)
 	{
 		Value = value;
 	}
