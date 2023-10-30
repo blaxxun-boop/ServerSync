@@ -13,6 +13,8 @@ using BepInEx.Configuration;
 using HarmonyLib;
 using JetBrains.Annotations;
 using UnityEngine;
+using Version = System.Version;
+using CompressionLevel = System.IO.Compression.CompressionLevel;
 
 namespace ServerSync;
 
@@ -264,6 +266,7 @@ public class ConfigSync
 
 			IEnumerator WatchAdminListChanges()
 			{
+				MethodInfo? listContainsId = AccessTools.DeclaredMethod(typeof(ZNet), "ListContainsId");
 				SyncedList adminList = (SyncedList)AccessTools.DeclaredField(typeof(ZNet), "m_adminList").GetValue(ZNet.instance);
 				List<string> CurrentList = new(adminList.GetList());
 				for (;;)
@@ -286,7 +289,11 @@ public class ConfigSync
 							}
 						}
 
-						List<ZNetPeer> adminPeer = ZNet.instance.GetPeers().Where(p => adminList.Contains(p.m_rpc.GetSocket().GetHostName())).ToList();
+						List<ZNetPeer> adminPeer = ZNet.instance.GetPeers().Where(p =>
+						{
+							string client = p.m_rpc.GetSocket().GetHostName();
+							return listContainsId is null ? adminList.Contains(client) : (bool)listContainsId.Invoke(ZNet.instance, new object[] { adminList, client });
+						}).ToList();
 						List<ZNetPeer> nonAdminPeer = ZNet.instance.GetPeers().Except(adminPeer).ToList();
 						SendAdmin(nonAdminPeer, false);
 						SendAdmin(adminPeer, true);
@@ -417,6 +424,8 @@ public class ConfigSync
 
 			ParsedConfigs configs = ReadConfigsFromPackage(package);
 
+			ConfigFile? configFile = null;
+			bool originalSaveOnConfigSet = false;
 			foreach (KeyValuePair<OwnConfigEntryBase, object?> configKv in configs.configValues)
 			{
 				if (!isServer && configKv.Key.LocalBaseValue == null)
@@ -424,7 +433,17 @@ public class ConfigSync
 					configKv.Key.LocalBaseValue = configKv.Key.BaseConfig.BoxedValue;
 				}
 
+				if (configFile is null)
+				{
+					configFile = configKv.Key.BaseConfig.ConfigFile;
+					originalSaveOnConfigSet = configFile.SaveOnConfigSet;
+					configFile.SaveOnConfigSet = false;
+				}
 				configKv.Key.BaseConfig.BoxedValue = configKv.Value;
+			}
+			if (configFile is not null)
+			{
+				configFile.SaveOnConfigSet = originalSaveOnConfigSet;
 			}
 
 			foreach (KeyValuePair<CustomSyncedValueBase, object?> configKv in configs.customValues)
@@ -577,12 +596,24 @@ public class ConfigSync
 
 	private void resetConfigsFromServer()
 	{
+		ConfigFile? configFile = null;
+		bool originalSaveOnConfigSet = false;
 		foreach (OwnConfigEntryBase config in allConfigs.Where(config => config.LocalBaseValue != null))
 		{
+			if (configFile is null)
+			{
+				configFile = config.BaseConfig.ConfigFile;
+				originalSaveOnConfigSet = configFile.SaveOnConfigSet;
+				configFile.SaveOnConfigSet = false;
+			}
 			config.BaseConfig.BoxedValue = config.LocalBaseValue;
 			config.LocalBaseValue = null;
 		}
-
+		if (configFile is not null)
+		{
+			configFile.SaveOnConfigSet = originalSaveOnConfigSet;
+		}
+		
 		foreach (CustomSyncedValueBase config in allCustomValues.Where(config => config.LocalBaseValue != null))
 		{
 			config.BoxedValue = config.LocalBaseValue;
