@@ -28,15 +28,10 @@ public abstract class OwnConfigEntryBase
 }
 
 [PublicAPI]
-public class SyncedConfigEntry<T> : OwnConfigEntryBase
+public class SyncedConfigEntry<T>(ConfigEntry<T> sourceConfig) : OwnConfigEntryBase
 {
 	public override ConfigEntryBase BaseConfig => SourceConfig;
-	public readonly ConfigEntry<T> SourceConfig;
-
-	public SyncedConfigEntry(ConfigEntry<T> sourceConfig)
-	{
-		SourceConfig = sourceConfig;
-	}
+	public readonly ConfigEntry<T> SourceConfig = sourceConfig;
 
 	public T Value
 	{
@@ -613,7 +608,7 @@ public class ConfigSync
 		{
 			configFile.SaveOnConfigSet = originalSaveOnConfigSet;
 		}
-		
+
 		foreach (CustomSyncedValueBase config in allCustomValues.Where(config => config.LocalBaseValue != null))
 		{
 			config.BoxedValue = config.LocalBaseValue;
@@ -757,35 +752,30 @@ public class ConfigSync
 	[HarmonyPatch(typeof(ZNet), "RPC_PeerInfo")]
 	private class SendConfigsAfterLogin
 	{
-		private class BufferingSocket : ISocket
+		private class BufferingSocket(ISocket original) : ZPlayFabSocket, ISocket
 		{
 			public volatile bool finished = false;
 			public volatile int versionMatchQueued = -1;
 			public readonly List<ZPackage> Package = new();
-			public readonly ISocket Original;
+			public readonly ISocket Original = original;
 
-			public BufferingSocket(ISocket original)
-			{
-				Original = original;
-			}
+			public new bool IsConnected() => Original.IsConnected();
+			public new ZPackage Recv() => Original.Recv();
+			public new int GetSendQueueSize() => Original.GetSendQueueSize();
+			public new int GetCurrentSendRate() => Original.GetCurrentSendRate();
+			public new bool IsHost() => Original.IsHost();
+			public new void Dispose() => Original.Dispose();
+			public new bool GotNewData() => Original.GotNewData();
+			public new void Close() => Original.Close();
+			public new string GetEndPointString() => Original.GetEndPointString();
+			public new void GetAndResetStats(out int totalSent, out int totalRecv) => Original.GetAndResetStats(out totalSent, out totalRecv);
+			public new void GetConnectionQuality(out float localQuality, out float remoteQuality, out int ping, out float outByteSec, out float inByteSec) => Original.GetConnectionQuality(out localQuality, out remoteQuality, out ping, out outByteSec, out inByteSec);
+			public new ISocket Accept() => Original.Accept();
+			public new int GetHostPort() => Original.GetHostPort();
+			public new bool Flush() => Original.Flush();
+			public new string GetHostName() => Original.GetHostName();
 
-			public bool IsConnected() => Original.IsConnected();
-			public ZPackage Recv() => Original.Recv();
-			public int GetSendQueueSize() => Original.GetSendQueueSize();
-			public int GetCurrentSendRate() => Original.GetCurrentSendRate();
-			public bool IsHost() => Original.IsHost();
-			public void Dispose() => Original.Dispose();
-			public bool GotNewData() => Original.GotNewData();
-			public void Close() => Original.Close();
-			public string GetEndPointString() => Original.GetEndPointString();
-			public void GetAndResetStats(out int totalSent, out int totalRecv) => Original.GetAndResetStats(out totalSent, out totalRecv);
-			public void GetConnectionQuality(out float localQuality, out float remoteQuality, out int ping, out float outByteSec, out float inByteSec) => Original.GetConnectionQuality(out localQuality, out remoteQuality, out ping, out outByteSec, out inByteSec);
-			public ISocket Accept() => Original.Accept();
-			public int GetHostPort() => Original.GetHostPort();
-			public bool Flush() => Original.Flush();
-			public string GetHostName() => Original.GetHostName();
-
-			public void VersionMatch()
+			public new void VersionMatch()
 			{
 				if (finished)
 				{
@@ -797,7 +787,7 @@ public class ConfigSync
 				}
 			}
 
-			public void Send(ZPackage pkg)
+			public new void Send(ZPackage pkg)
 			{
 				int oldPos = pkg.GetPos();
 				pkg.SetPos(0);
@@ -827,7 +817,12 @@ public class ConfigSync
 				// Don't replace on steam sockets, RPC_PeerInfo does peer.m_socket as ZSteamSocket - which will cause a nullref when replaced
 				if (AccessTools.DeclaredMethod(typeof(ZNet), "GetPeer", new[] { typeof(ZRpc) }).Invoke(__instance, new object[] { rpc }) is ZNetPeer peer && ZNet.m_onlineBackend != OnlineBackendType.Steamworks)
 				{
-					AccessTools.DeclaredField(typeof(ZNetPeer), "m_socket").SetValue(peer, bufferingSocket);
+					FieldInfo field = AccessTools.DeclaredField(typeof(ZNetPeer), "m_socket");
+					if (field.GetValue(peer) is ZPlayFabSocket playFabSocket)
+					{
+						typeof(ZPlayFabSocket).GetField("m_remotePlayerId").SetValue(bufferingSocket, playFabSocket.m_remotePlayerId);
+					}
+					field.SetValue(peer, bufferingSocket);
 				}
 
 				__state ??= new Dictionary<Assembly, BufferingSocket>();
@@ -1220,7 +1215,7 @@ public class VersionCheck
 		bool otherVersionOk = new System.Version(ReceivedCurrentVersion) >= new System.Version(MinimumRequiredVersion);
 		return myVersionOk && otherVersionOk;
 	}
-	
+
 	[SuppressMessage("ReSharper", "RedundantNameQualifier")]
 	private string ErrorClient()
 	{
