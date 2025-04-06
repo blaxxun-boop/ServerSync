@@ -439,6 +439,7 @@ public class ConfigSync
 			if (configFile is not null)
 			{
 				configFile.SaveOnConfigSet = originalSaveOnConfigSet;
+				configFile.Save();
 			}
 
 			foreach (KeyValuePair<CustomSyncedValueBase, object?> configKv in configs.customValues)
