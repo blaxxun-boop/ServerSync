@@ -55,6 +55,8 @@ public class SyncedConfigEntry<T>(ConfigEntry<T> sourceConfig) : OwnConfigEntryB
 public abstract class CustomSyncedValueBase
 {
 	public event Action? ValueChanged;
+	
+	public void Update() => ValueChanged?.Invoke();
 
 	public object? LocalBaseValue;
 
@@ -95,6 +97,8 @@ public sealed class CustomSyncedValue<T> : CustomSyncedValueBase
 		get => (T)BoxedValue!;
 		set => BoxedValue = value;
 	}
+
+	
 
 	public CustomSyncedValue(ConfigSync configSync, string identifier, T value = default!, int priority = 0) : base(configSync, identifier, typeof(T), priority)
 	{
@@ -394,9 +398,9 @@ public class ConfigSync
 				package = new ZPackage(dataFragments.Values.SelectMany(a => a).ToArray());
 				packageFlags = package.ReadByte();
 			}
-
+ 
 			ProcessingServerUpdate = true;
-
+ 
 			if ((packageFlags & COMPRESSED_CONFIG) != 0)
 			{
 				byte[] data = package.ReadByteArray();
@@ -626,9 +630,9 @@ public class ConfigSync
 	{
 		if (ZRoutedRpc.instance is not { } rpc)
 		{
-			yield break;
+			yield break; 
 		}
-
+ 
 		const int packageSliceSize = 250000;
 		const int maximumSendQueueSize = 20000;
 
@@ -660,36 +664,36 @@ public class ConfigSync
 			{
 				rpc.InvokeRoutedRPC(peer.m_server ? 0 : peer.m_uid, method, pkg);
 			}
-		}
+		} 
+		if (package.Size() > packageSliceSize)
+		{ 
+			if (!package.m_stream.TryGetBuffer(out ArraySegment<byte> seg))
+			{
+				byte[] arr = package.m_stream.ToArray();
+				seg = new ArraySegment<byte>(arr, 0, arr.Length);
+			} 
 
-		if (package.GetArray() is { LongLength: > packageSliceSize } data)
-		{
-			int fragments = (int)(1 + (data.LongLength - 1) / packageSliceSize);
+			int len = seg.Count;
+			int fragments = (len + packageSliceSize - 1) / packageSliceSize;
 			long packageIdentifier = ++packageCounter;
+			
 			for (int fragment = 0; fragment < fragments; ++fragment)
 			{
-				foreach (bool wait in waitForQueue())
-				{
-					yield return wait;
-				}
+				foreach (bool wait in waitForQueue()) yield return wait;
+				if (!peer.m_socket.IsConnected()) yield break;
 
-				if (!peer.m_socket.IsConnected())
-				{
-					yield break;
-				}
-
-				ZPackage fragmentedPackage = new();
+				int offset = fragment * packageSliceSize;
+				int count  = Math.Min(packageSliceSize, len - offset);
+ 
+				ZPackage fragmentedPackage = new ZPackage();
 				fragmentedPackage.Write(FRAGMENTED_CONFIG);
 				fragmentedPackage.Write(packageIdentifier);
-				fragmentedPackage.Write(fragment);
+				fragmentedPackage.Write(fragment); 
 				fragmentedPackage.Write(fragments);
-				fragmentedPackage.Write(data.Skip(packageSliceSize * fragment).Take(packageSliceSize).ToArray());
+				fragmentedPackage.Write(count);
+				fragmentedPackage.m_stream.Write(seg.Array, seg.Offset + offset, count);
 				SendPackage(fragmentedPackage);
-
-				if (fragment != fragments - 1)
-				{
-					yield return true;
-				}
+				if (fragment != fragments - 1) yield return true;
 			}
 		}
 		else
@@ -725,20 +729,21 @@ public class ConfigSync
 		{
 			yield break;
 		}
-
-		const int compressMinSize = 10000;
-
-		if (package.GetArray() is { LongLength: > compressMinSize } rawData)
-		{
-			ZPackage compressedPackage = new();
-			compressedPackage.Write(COMPRESSED_CONFIG);
-			MemoryStream output = new();
-			using (DeflateStream deflateStream = new(output, CompressionLevel.Optimal))
-			{
-				deflateStream.Write(rawData, 0, rawData.Length);
-			}
-			compressedPackage.Write(output.ToArray());
-			package = compressedPackage;
+  
+		const int compressMinSize = 10000; 
+		 
+		if (package.Size() > compressMinSize) 
+		{ 
+			MemoryStream oldStream = package.m_stream;
+			oldStream.Position = 0;
+			package = new ZPackage();
+			package.m_stream.WriteByte(COMPRESSED_CONFIG);
+			package.m_stream.Position = 5;
+			using (var deflate = new DeflateStream(package.m_stream, CompressionLevel.Optimal, leaveOpen: true)) oldStream.CopyTo(deflate);
+			long endPos = package.m_stream.Position;
+			int compLen = (int)(endPos - 5);
+			package.m_stream.Position = 1;
+			package.m_stream.Write(BitConverter.GetBytes(compLen), 0, 4);
 		}
 
 		List<IEnumerator<bool>> writers = peers.Where(peer => peer.IsReady()).Select(p => distributeConfigToPeers(p, package)).ToList();
